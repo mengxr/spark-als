@@ -1,8 +1,14 @@
 package als
 
-import org.apache.spark.Partitioner
+import org.apache.spark.{HashPartitioner, Partitioner}
+import org.apache.spark.mllib.recommendation.Rating
 
 import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
+
+import com.github.fommil.netlib.F2jBLAS
+import com.github.fommil.netlib.LAPACK.{getInstance => lapack}
+import org.netlib.util.intW
 
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
@@ -18,25 +24,184 @@ class ALS {
   var prodAssignments: RDD[AssignmentBlock] = _
   var userComputations: RDD[ComputationBlock] = _
   var prodComputations: RDD[ComputationBlock] = _
+
+  def run(ratings: RDD[Rating], numBlocks: Int): (RDD[FactorBlock], RDD[FactorBlock]) = {
+    val srcPart = new HashPartitioner(numBlocks)
+    val dstPart = new HashPartitioner(numBlocks)
+    val blocks = ratings.groupBy(x => (srcPart.getPartition(x.user), dstPart.getPartition(x.product))).mapValues(_.toSeq)
+    blocks.mapValues(optimizeBlock(_, k))
+    null
+  }
+}
+
+class LeastSquares(k: Int) {
+
+  val ata = new Array[Float](k * (k + 1) / 2)
+  val atb = new Array[Float](k)
+  var n = 0
+
+  import LeastSquares._
+
+  def add(a: Array[Float], b: Float): this.type = {
+    blas.sspr("U", a.length, 1.0f, a, 1, ata)
+    blas.saxpy(a.length, b, a, 1, atb, 1)
+    n += 1
+    this
+  }
+
+  def merge(other: LeastSquares): this.type = {
+    blas.saxpy(ata.length, 1.0f, other.ata, 1, ata, 1)
+    blas.saxpy(atb.length, 1.0f, other.atb, 1, atb, 1)
+    n += other.n
+    this
+  }
+
+  def solve(lambda: Float): Array[Float] = {
+    val scaledlambda = lambda * n
+    var i = 0
+    var j = 2
+    while (i < ata.size) {
+      ata(i) += scaledlambda
+      i += j
+      j += 1
+    }
+    val info = new intW(0)
+    lapack.sppsv("U", atb.length, 1, ata, atb, atb.length, info)
+    val code = info.`val`
+    assert(code == 0, s"lapack.sppsv returned $code.")
+    atb
+  }
+}
+
+object LeastSquares {
+  val blas = new F2jBLAS
+}
+
+class IdentityPartitioner(override val numPartitions: Int) extends Partitioner {
+  override def getPartition(key: Any): Int = key.asInstanceOf[Int]
+  override def equals(other: Any): Boolean = {
+    other match {
+      case p: IdentityPartitioner =>
+        this.numPartitions == p.numPartitions
+      case _ =>
+        false
+    }
+  }
 }
 
 object ALS {
+
+  val blas = new F2jBLAS
 
   // (blockId, factors)
   type FactorBlock = (Int, Map[Int, Array[Float]])
   type AssignmentBlock = (Int, Seq[Assignment])
   type ComputationBlock = (Int, Computation)
 
-  class IdentityPartitioner(override val numPartitions: Int) extends Partitioner {
-    override def getPartition(key: Any): Int = key.asInstanceOf[Int]
-    override def equals(other: Any): Boolean = {
-      other match {
-        case p: IdentityPartitioner =>
-          this.numPartitions == p.numPartitions
-        case _ =>
-          false
-      }
+  def optimizeBlock(ratings: Seq[Rating], k: Int): Unit = {
+    val countByUser = mutable.Map.empty[Int, Int]
+    ratings.foreach { r =>
+      val c = countByUser.getOrElse(r.user, 0)
+      countByUser(r.user) = c + 1
     }
+    val groupByProduct = ratings.groupBy(r => r.product).toSeq.sortBy(-_._2.size).toArray
+    val numProducts = groupByProduct.size
+    val numUsers = countByUser.size
+    var cost = 1.0 * numUsers * (k + 1)
+    var bestCost = cost
+    var bestDirectStart = 0
+    var i = 1
+    groupByProduct.foreach { case (p, rr) =>
+      cost += k * (k + 3) / 2
+      rr.foreach { r =>
+        countByUser(r.user) -= 1
+        if (countByUser(r.user) == 0) {
+          cost -= k + 1
+        }
+      }
+      if (cost < bestCost) {
+        bestCost = cost
+        bestDirectStart = i
+      }
+      i += 1
+    }
+    def compress(start: Int, end: Int): (Array[Int], Array[Int], Array[Int], Array[Double]) = {
+      val size = end - start
+      val products = new Array[Int](size)
+      val userCountsBuffer = ArrayBuffer.empty[Int]
+      val usersBuffer = ArrayBuffer.empty[Int]
+      val ratingsBuffer = ArrayBuffer.empty[Double]
+      i = start
+      while (i < end) {
+        val (product, rr) = groupByProduct(i)
+        products(i) = product
+        userCountsBuffer += rr.size
+        usersBuffer ++= rr.map(_.user)
+        ratingsBuffer ++= rr.map(_.rating)
+      }
+      val userPtrs = userCountsBuffer.scanLeft(0)(_ + _).toArray
+      val users = usersBuffer.toArray
+      val ratings = ratingsBuffer.toArray
+      (products, userPtrs, users, ratings)
+    }
+    val (matrixProducts, matrixUserPtrs, matrixUsers, matrixRatings) =
+      compress(0, bestDirectStart)
+    val (directProducts, directUserPtrs, directUsers, directRatings) =
+      compress(bestDirectStart, numProducts)
+  }
+
+
+  def makeAssignment(ratings: Seq[Rating], k: Int): (Assignment, Computation) = {
+    val countBySrc = mutable.Map.empty[Int, Int]
+    ratings.foreach { r =>
+      val c = countBySrc.getOrElse(r.user, 0)
+      countBySrc(r.user) = c + 1
+    }
+    val groupByDst = ratings.groupBy(r => r.product).toSeq.sortBy(-_._2.size).toArray
+    val numProducts = groupByDst.size
+    val numUsers = countBySrc.size
+    var cost = 1.0 * numUsers * (k + 1)
+    var bestCost = cost
+    var bestDirectStart = 0
+    var i = 1
+    groupByDst.foreach { case (p, rr) =>
+      cost += k * (k + 3) / 2
+      rr.foreach { r =>
+        countBySrc(r.user) -= 1
+        if (countBySrc(r.user) == 0) {
+          cost -= k + 1
+        }
+      }
+      if (cost < bestCost) {
+        bestCost = cost
+        bestDirectStart = i
+      }
+      i += 1
+    }
+    def compress(start: Int, end: Int): (Array[Int], Array[Int], Array[Int], Array[Double]) = {
+      val size = end - start
+      val products = new Array[Int](size)
+      val userCountsBuffer = ArrayBuffer.empty[Int]
+      val usersBuffer = ArrayBuffer.empty[Int]
+      val ratingsBuffer = ArrayBuffer.empty[Double]
+      i = start
+      while (i < end) {
+        val (product, rr) = groupByDst(i)
+        products(i) = product
+        userCountsBuffer += rr.size
+        usersBuffer ++= rr.map(_.user)
+        ratingsBuffer ++= rr.map(_.rating)
+      }
+      val userPtrs = userCountsBuffer.scanLeft(0)(_ + _).toArray
+      val users = usersBuffer.toArray
+      val ratings = ratingsBuffer.toArray
+      (products, userPtrs, users, ratings)
+    }
+    val (matrixProducts, matrixUserPtrs, matrixUsers, matrixRatings) =
+      compress(0, bestDirectStart)
+    val (directProducts, directUserPtrs, directUsers, directRatings) =
+      compress(bestDirectStart, numProducts)
+    null
   }
 
   case class Assignment(
@@ -47,29 +212,8 @@ object ALS {
       matrixSrcIds: Array[Int],
       matrixRatings: Array[Float])
 
-  case class LeastSquares(
-      ata: Array[Float],
-      atb: Array[Float]) {
-
-    def this(k: Int) = this(new Array[Float](k * (k + 1) / 2), new Array[Float](k))
-
-    def add(a: Array[Float], b: Float): this.type = {
-      null
-      this
-    }
-
-    def merge(other: LeastSquares): this.type = {
-      null
-      this
-    }
-
-    def solve(): Array[Float] = {
-      null
-    }
-  }
-
   case class AssignmentOutput(
-     factors: Seq[(Int, Array[Float])],
+     factors: mutable.ListBuffer[(Int, Array[Float])],
      matrices: mutable.Map[Int, LeastSquares]) {
 
     def merge(other: AssignmentOutput): this.type = {
@@ -114,7 +258,7 @@ object ALS {
            matrices += ((dstId, ls))
            j += 1
          }
-         (dstBlockId, AssignmentOutput(directFactors, matrices))
+         (dstBlockId, AssignmentOutput(mutable.ListBuffer.empty ++ directFactors.toSeq, matrices))
        }
     }
     val merged = assignmentOutputs.reduceByKey(computations.partitioner.get, (o1, o2) => o1.merge(o2))
@@ -131,7 +275,7 @@ object ALS {
           ls.add(srcFactorMap(srcId), directRatings(i))
           i += 1
         }
-        dstFactors += ((dstId, ls.solve()))
+        dstFactors += ((dstId, ls.solve(lambda = 0.1f)))
         j += 1
       }
       dstFactors.toMap
