@@ -1,5 +1,7 @@
 package als
 
+import java.util
+
 import org.apache.spark.{HashPartitioner, Partitioner}
 import org.apache.spark.mllib.recommendation.Rating
 
@@ -65,11 +67,19 @@ class LeastSquares(k: Int) {
       i += j
       j += 1
     }
+    val x = atb.clone()
     val info = new intW(0)
-    lapack.sppsv("U", atb.length, 1, ata, atb, atb.length, info)
+    lapack.sppsv("U", atb.length, 1, ata, x, atb.length, info)
     val code = info.`val`
     assert(code == 0, s"lapack.sppsv returned $code.")
-    atb
+    reset()
+    x
+  }
+
+  def reset(): Unit = {
+    util.Arrays.fill(ata, 0.0f)
+    util.Arrays.fill(atb, 0.0f)
+    n = 0
   }
 }
 

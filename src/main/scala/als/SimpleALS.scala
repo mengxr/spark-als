@@ -219,8 +219,8 @@ object SimpleALS {
       val sortedSrcFactors = srcFactors.toSeq.sortBy(_._1).map(_._2).toArray
       val dstFactors = new Array[Array[Float]](dstIds.size)
       var j = 0
+      val ls = new LeastSquares(k)
       while (j < dstIds.size) {
-        val ls = new LeastSquares(k)
         var i = srcPtrs(j)
         while (i < srcPtrs(j + 1)) {
           val srcBlockId = srcBlockIds(i)
