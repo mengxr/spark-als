@@ -123,7 +123,7 @@ object SimpleALS {
         val idx = gridPart.getPartition((srcId, dstId))
         val block = blocks(idx)
         block.add(srcId, dstId, rating)
-        if (block.size > (1 << 20)) {
+        if (block.size > (1 << 16)) { // 512k
           blocks(idx) = new BufferedRatingBlock
           val Array(srcBlockId, dstBlockId) = gridPart.indices(idx)
           Iterator.single(((srcBlockId, dstBlockId), block.toRatingBlock))
