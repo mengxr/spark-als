@@ -35,6 +35,7 @@ class SimpleALS {
     userOutBlocks.unpersist()
     prodInBlocks.unpersist()
     prodOutBlocks.unpersist()
+    blockRatings.unpersist()
     val userOutput = userIdAndFactors.flatMap { case (ids, factors) =>
       ids.view.zip(factors)
     }
@@ -80,21 +81,66 @@ object SimpleALS {
 
   case class RatingBlock(srcIds: Array[Int], dstIds: Array[Int], localRatings: Array[Float])
 
+  class BufferedRatingBlock extends Serializable {
+
+    private val srcIds: ArrayBuffer[Int] = ArrayBuffer.empty
+    private val dstIds: ArrayBuffer[Int] = ArrayBuffer.empty
+    private val ratings: ArrayBuffer[Float] = ArrayBuffer.empty
+
+    def add(srcId: Int, dstId: Int, rating: Float): this.type = {
+      srcIds += srcId
+      dstIds += dstId
+      ratings += rating
+      this
+    }
+
+    def merge(other: BufferedRatingBlock): this.type = {
+      srcIds ++= other.srcIds
+      dstIds ++= other.dstIds
+      ratings ++= other.ratings
+      this
+    }
+
+    def merge(other: RatingBlock): this.type = {
+      srcIds ++= other.srcIds
+      dstIds ++= other.dstIds
+      ratings ++= other.localRatings
+      this
+    }
+
+    def size: Int = srcIds.size
+
+    def toRatingBlock: RatingBlock = {
+      RatingBlock(srcIds.toArray, dstIds.toArray, ratings.toArray)
+    }
+  }
+
   def blockifyRatings(ratings: RDD[(Int, Int, Float)], srcPart: Partitioner, dstPart: Partitioner): RDD[((Int, Int), RatingBlock)] = {
-    ratings.groupBy(x => (srcPart.getPartition(x._1), dstPart.getPartition(x._2)))
-        .mapPartitions({ iter =>
-      iter.map { case ((srcBlockId, dstBlockId), entries) =>
-        val srcIds = ArrayBuffer.empty[Int]
-        val dstIds = ArrayBuffer.empty[Int]
-        val localRatings = ArrayBuffer.empty[Float]
-        entries.foreach { case (srcId, dstId, rating) =>
-          srcIds += srcId
-          dstIds += dstId
-          localRatings += rating
+    val gridPart = new GridPartitioner(Array(srcPart, dstPart))
+    ratings.mapPartitions { iter =>
+      val blocks = Array.fill(gridPart.numPartitions)(new BufferedRatingBlock)
+      iter.flatMap { case (srcId, dstId, rating) =>
+        val idx = gridPart.getPartition((srcId, dstId))
+        val block = blocks(idx)
+        block.add(srcId, dstId, rating)
+        if (block.size > (1 << 20)) {
+          blocks(idx) = new BufferedRatingBlock
+          val Array(srcBlockId, dstBlockId) = gridPart.indices(idx)
+          Iterator.single(((srcBlockId, dstBlockId), block.toRatingBlock))
+        } else {
+          Iterator.empty
         }
-        ((srcBlockId, dstBlockId), RatingBlock(srcIds.toArray, dstIds.toArray, localRatings.toArray))
+      } ++ {
+        blocks.view.zipWithIndex.filter(_._1.size > 0).map { case (block, idx) =>
+          val Array(srcBlockId, dstBlockId) = gridPart.indices(idx)
+          ((srcBlockId, dstBlockId), block.toRatingBlock)
+        }
       }
-    }, preservesPartitioning = true).setName("blockRatings")
+    }.groupByKey().mapValues { iter =>
+      val buffered = new BufferedRatingBlock
+      iter.foreach(buffered.merge)
+      buffered.toRatingBlock
+    }.setName("blockRatings")
   }
 
   def makeBlocks(
