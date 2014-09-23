@@ -8,156 +8,184 @@ import org.apache.spark.{Partitioner, HashPartitioner}
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 
-import cern.colt.map.OpenIntObjectHashMap
-
 class SimpleALS {
 
   import SimpleALS._
 
-  def run(ratings: RDD[(Int, Int, Float)], k: Int = 10, numBlocks: Int = 10, numIterations: Int = 10): (RDD[FactorBlock], RDD[FactorBlock]) = {
+  def run(ratings: RDD[(Int, Int, Float)], k: Int = 10, numBlocks: Int = 10, numIterations: Int = 10): (RDD[(Int, Array[Float])], RDD[(Int, Array[Float])]) = {
     val userPart = new HashPartitioner(numBlocks)
     val prodPart = new HashPartitioner(numBlocks)
-    val (userInBlocks, userOutBlocks) = makeBlocks("user", ratings, userPart, prodPart)
-    val (prodInBlocks, prodOutBlocks) = makeBlocks("prod", ratings.map(x => (x._2, x._1, x._3)), prodPart, userPart)
+    val blockRatings = blockifyRatings(ratings, userPart, prodPart).cache()
+    val (userInBlocks, userOutBlocks) = makeBlocks("user", blockRatings, userPart, prodPart)
+    val swappedBlockRatings = blockRatings.map { case ((userBlockId, prodBlockId), RatingBlock(userIds, prodIds, localRatings)) =>
+      ((prodBlockId, userBlockId), RatingBlock(prodIds, userIds, localRatings))
+    }
+    val (prodInBlocks, prodOutBlocks) = makeBlocks("prod", swappedBlockRatings, prodPart, userPart)
     var userFactors = initialize(userInBlocks, k)
     var prodFactors = initialize(prodInBlocks, k)
     for (iter <- 0 until numIterations) {
       prodFactors = computeFactors(userFactors, userOutBlocks, prodInBlocks, k)
       userFactors = computeFactors(prodFactors, prodOutBlocks, userInBlocks, k)
     }
-    userFactors.cache()
-    prodFactors.cache()
-    userFactors.count()
-    prodFactors.count()
+    val userIdAndFactors = userInBlocks.mapValues(_.srcIds).join(userFactors).values.cache()
+    val prodIdAndFactors = prodInBlocks.mapValues(_.srcIds).join(prodFactors).values.cache()
+    userIdAndFactors.count()
+    prodIdAndFactors.count()
     userInBlocks.unpersist()
     userOutBlocks.unpersist()
     prodInBlocks.unpersist()
     prodOutBlocks.unpersist()
-    (userFactors, prodFactors)
+    val userOutput = userIdAndFactors.flatMap { case (ids, factors) =>
+      ids.view.zip(factors)
+    }
+    val prodOutput = prodIdAndFactors.flatMap { case (ids, factors) =>
+      ids.view.zip(factors)
+    }
+    (userOutput, prodOutput)
   }
 }
 
 object SimpleALS {
 
-  type FactorBlock = Array[(Int, Array[Float])]
-  type OutBlock = Array[Array[Int]]
+  type FactorBlock = (Int, Array[Array[Float]])
+  type OutBlock = (Int, Array[Array[Int]])
 
   /**
    * In links for computing src factors.
    * @param srcIds
    * @param dstPtrs
-   * @param dstIds
+   * @param dstBlockIds
+   * @param dstLocalIndices
    * @param ratings
    */
   case class InBlock(
     srcIds: Array[Int],
     dstPtrs: Array[Int],
-    dstIds: Array[Int],
-    ratings: Array[Float]) {
+    dstBlockIds: Array[Short],
+    dstLocalIndices: Array[Int],
+    ratings: Array[Float])
 
-    def foreach(f: (Int, Int, Float) => Unit): Unit = {
-      var i = 0
-      while (i < srcIds.length) {
-        val srcId = srcIds(i)
-        var j = dstPtrs(i)
-        while (j < dstPtrs(i + 1)) {
-          f(srcId, dstIds(j), ratings(j))
-          j += 1
-        }
-        i += 1
+  def initialize(inBlocks: RDD[(Int, InBlock)], k: Int): RDD[FactorBlock] = {
+    inBlocks.map { case (srcBlockId, inBlock) =>
+      val random = new java.util.Random(srcBlockId)
+      val factors = Array.fill(inBlock.srcIds.size) {
+        val factor = Array.fill(k)(random.nextFloat())
+        val nrm = blas.snrm2(k, factor, 1)
+        blas.sscal(k, 1.0f / nrm, factor, 1)
+        factor
       }
+      (srcBlockId, factors)
     }
   }
 
-  def initialize(inBlocks: RDD[InBlock], k: Int): RDD[FactorBlock] = {
-    inBlocks.mapPartitionsWithIndex  { (srcBlockId, iter) =>
-      val random = new java.util.Random(srcBlockId)
-      val inBlock = iter.next()
-      Iterator.single(inBlock.srcIds.map { srcId =>
-        val factor = Array.fill(k)(random.nextFloat())
-        val nrm = blas.snrm2(k, factor, 1)
-        blas.sscal(k, 1.0f/nrm, factor, 1)
-        (srcId, factor)
-      })
-    }
+  case class RatingBlock(srcIds: Array[Int], dstIds: Array[Int], localRatings: Array[Float])
+
+  def blockifyRatings(ratings: RDD[(Int, Int, Float)], srcPart: Partitioner, dstPart: Partitioner): RDD[((Int, Int), RatingBlock)] = {
+    ratings.groupBy(x => (srcPart.getPartition(x._1), dstPart.getPartition(x._2)))
+        .mapPartitions({ iter =>
+      iter.map { case ((srcBlockId, dstBlockId), entries) =>
+        val srcIds = ArrayBuffer.empty[Int]
+        val dstIds = ArrayBuffer.empty[Int]
+        val localRatings = ArrayBuffer.empty[Float]
+        entries.foreach { case (srcId, dstId, rating) =>
+          srcIds += srcId
+          dstIds += dstId
+          localRatings += rating
+        }
+        ((srcBlockId, dstBlockId), RatingBlock(srcIds.toArray, dstIds.toArray, localRatings.toArray))
+      }
+    }, preservesPartitioning = true).setName("blockRatings")
   }
 
   def makeBlocks(
       prefix: String,
-      ratings: RDD[(Int, Int, Float)],
+      ratingBlocks: RDD[((Int, Int), RatingBlock)],
       srcPart: Partitioner,
-      dstPart: Partitioner): (RDD[InBlock], RDD[OutBlock]) = {
-    val inBlocks = ratings.map(x => (x._1, (x._2, x._3)))
-        .groupByKey(srcPart)
-        .mapPartitionsWithIndex { (srcBlockId, iter) =>
+      dstPart: Partitioner): (RDD[(Int, InBlock)], RDD[OutBlock]) = {
+    val inBlocks = ratingBlocks.map { case ((srcBlockId, dstBlockId), RatingBlock(srcIds, dstIds, localRatings)) =>
+      val dstIdToLocalIndex = dstIds.toSet.toSeq.sorted.zipWithIndex.toMap
+      val dstLocalIndices = dstIds.map(dstIdToLocalIndex.apply)
+      (srcBlockId, (dstBlockId, srcIds, dstLocalIndices, localRatings))
+    }.groupByKey(new IdentityPartitioner(srcPart.numPartitions))
+        .mapValues { iter =>
+      // TODO: use better sort
+      val entries = iter.flatMap { case (dstBlockId, theSrcIds, theDstLocalIndices, theLocalRatings) =>
+        (0 until theSrcIds.size).map { i =>
+          (theSrcIds(i), dstBlockId.toShort, theDstLocalIndices(i), theLocalRatings(i))
+        }
+      }.toSeq.sorted
+      val size = entries.size
       val srcIds = ArrayBuffer.empty[Int]
       val dstCounts = ArrayBuffer.empty[Int]
-      val dstIds = ArrayBuffer.empty[Int]
-      val theRatings = ArrayBuffer.empty[Float]
-      iter.foreach { case (srcId, dstIdAndRatings) =>
-        srcIds += srcId
-        var count = 0
-        dstIdAndRatings.foreach { case (dstId, rating) =>
-          count += 1
-          dstIds += dstId
-          theRatings += rating
+      val dstBlockIds = new Array[Short](size)
+      val dstLocalIndices = new Array[Int](size)
+      val localRatings = new Array[Float](size)
+      var i = 0
+      var j = -1
+      entries.foreach { case (srcId, dstBlockId, dstLocalIndex, rating) =>
+        if (srcIds.isEmpty || srcId != srcIds.last) {
+          srcIds += srcId
+          dstCounts += 0
+          j += 1
         }
-        dstCounts += count
+        dstCounts(j) += 1
+        dstBlockIds(i) = dstBlockId
+        dstLocalIndices(i) = dstLocalIndex
+        localRatings(i) = rating
+        i += 1
       }
-      val dstPtrs = dstCounts.toArray.scanLeft(0)(_ + _)
-      Iterator.single(InBlock(srcIds.toArray, dstPtrs, dstIds.toArray, theRatings.toArray))
-    }
-    inBlocks.setName(prefix + "InBlocks").cache()
-    val outBlocks = inBlocks.map { inBlock =>
-      val sets = Array.fill(srcPart.numPartitions)(ArrayBuffer.empty[Int])
-      inBlock.foreach { case (srcId, dstId, rating) =>
-        sets(dstPart.getPartition(dstId)) += srcId
+      val dstPtrs = dstCounts.scanLeft(0)(_ + _).toArray
+      InBlock(srcIds.toArray, dstPtrs, dstBlockIds, dstLocalIndices, localRatings)
+    }.setName(prefix + "InBlocks").cache()
+    val outBlocks = inBlocks.mapValues { case InBlock(srcIds, dstPtrs, dstBlockIds, _, _) =>
+      val activeIds = Array.fill(dstPart.numPartitions)(ArrayBuffer.empty[Int])
+      var i = 0
+      while (i < srcIds.size) {
+        var j = dstPtrs(i)
+        var preDstBlockId: Short = -1
+        while (j < dstPtrs(i + 1)) {
+          val dstBlockId = dstBlockIds(j)
+          if (dstBlockId != preDstBlockId) {
+            activeIds(dstBlockId) += i
+            preDstBlockId = dstBlockId
+          }
+          j += 1
+        }
+        i += 1
       }
-      sets.map(_.toArray)
-    }
-    outBlocks.setName(prefix + "OutBlocks").cache()
+      activeIds.map(_.toArray)
+    }.setName(prefix + "OutBlocks").cache()
     (inBlocks, outBlocks)
   }
 
   def computeFactors(
       srcFactorBlocks: RDD[FactorBlock],
       srcOutBlocks: RDD[OutBlock],
-      dstInBlocks: RDD[InBlock],
+      dstInBlocks: RDD[(Int, InBlock)],
       k: Int): RDD[FactorBlock] = {
-    val srcOut = srcOutBlocks.zip(srcFactorBlocks).flatMap { case (srcOutBlock, srcFactors) =>
-      val srcFactorMap = new OpenIntObjectHashMap(srcFactors.size)
-      srcFactors.foreach { case (srcId, srcFactor) =>
-        srcFactorMap.put(srcId, srcFactor)
-      }
-      srcOutBlock.view.zipWithIndex.map { case (srcIds, dstBlockId) =>
-        val outputFactors = ArrayBuffer.empty[(Int, Array[Float])]
-        srcIds.foreach { i =>
-          outputFactors += ((i, srcFactorMap.get(i).asInstanceOf[Array[Float]]))
-        }
-        (dstBlockId, outputFactors.toArray)
+    val srcOut = srcOutBlocks.join(srcFactorBlocks).flatMap { case (srcBlockId, (srcOutBlock, srcFactors)) =>
+      srcOutBlock.view.zipWithIndex.map { case (activeIndices, dstBlockId) =>
+        (dstBlockId, (srcBlockId, activeIndices.map(idx => srcFactors(idx))))
       }
     }
-    val merged = srcOut.reduceByKey(new IdentityPartitioner(dstInBlocks.partitions.size), _ ++ _).values
-    dstInBlocks.zip(merged).map { case (InBlock(dstIds, srcPtrs, srcIds, ratings), srcFactors) =>
-      val srcFactorMap = new OpenIntObjectHashMap(srcFactors.size)
-      srcFactors.foreach { case (srcId, srcFactor) =>
-        srcFactorMap.put(srcId, srcFactor)
-      }
-      val dstFactors = ArrayBuffer.empty[(Int, Array[Float])]
+    val merged = srcOut.groupByKey(new IdentityPartitioner(dstInBlocks.partitions.size))
+    dstInBlocks.join(merged).mapValues { case (InBlock(dstIds, srcPtrs, srcBlockIds, srcLocalIndices, ratings), srcFactors) =>
+      val sortedSrcFactors = srcFactors.toSeq.sortBy(_._1).map(_._2).toArray
+      val dstFactors = new Array[Array[Float]](dstIds.size)
       var j = 0
-      while (j < dstIds.length) {
-        val dstId = dstIds(j)
+      while (j < dstIds.size) {
         val ls = new LeastSquares(k)
         var i = srcPtrs(j)
         while (i < srcPtrs(j + 1)) {
-          val srcId = srcIds(i)
-          ls.add(srcFactorMap.get(srcId).asInstanceOf[Array[Float]], ratings(i))
+          val srcBlockId = srcBlockIds(i)
+          val srcLocalIndex = srcLocalIndices(i)
+          ls.add(sortedSrcFactors(srcBlockId)(srcLocalIndex), ratings(i))
           i += 1
         }
-        dstFactors += ((dstId, ls.solve(lambda = 0.1f)))
+        dstFactors(j) = ls.solve(lambda = 0.1f)
         j += 1
       }
-      dstFactors.toArray
+      dstFactors
     }
   }
 }
