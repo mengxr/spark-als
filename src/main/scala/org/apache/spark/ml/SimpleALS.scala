@@ -1,11 +1,14 @@
 package org.apache.spark.ml
 
+import java.util.Comparator
+
 import als.{GridPartitioner, IdentityPartitioner, LeastSquares}
 import com.github.fommil.netlib.BLAS.{getInstance => blas}
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{HashPartitioner, Partitioner}
-import org.apache.spark.util.collection.{SortDataFormat, Sorter}
+import org.apache.spark.util.collection.SortDataFormat
+import org.apache.spark.ml.util.Sorter
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -144,45 +147,142 @@ object SimpleALS {
     }.setName("blockRatings")
   }
 
+  class UncompressedBlockBuilder {
+
+    val srcIds = ArrayBuffer.empty[Int]
+    val dstBlockIds = ArrayBuffer.empty[Short]
+    val dstLocalIndices = ArrayBuffer.empty[Int]
+    val ratings = ArrayBuffer.empty[Float]
+
+    def add(theDstBlockId: Short, theSrcIds: Array[Int], theDstLocalIndices: Array[Int], theRatings: Array[Float]): this.type = {
+      val sz = theSrcIds.size
+      require(theDstLocalIndices.size == sz)
+      require(theRatings.size == sz)
+      srcIds ++= theSrcIds
+      val shortDstBlockId = theDstBlockId.toShort
+      var j = 0
+      while (j < sz) {
+        dstBlockIds += shortDstBlockId
+        j += 1
+      }
+      dstLocalIndices ++= theDstLocalIndices
+      ratings ++= theRatings
+      this
+    }
+
+    def build(): UncompressedBlock = {
+      new UncompressedBlock(srcIds.toArray, dstBlockIds.toArray, dstLocalIndices.toArray, ratings.toArray)
+    }
+  }
+
+  class UncompressedBlock(
+      var srcIds: Array[Int],
+      var dstBlockIds: Array[Short],
+      var dstLocalIndices: Array[Int],
+      var ratings: Array[Float]) {
+
+    def size: Int = srcIds.size
+
+    def compress(): InBlock = {
+      val sz = size
+      assert(sz > 0)
+      sort()
+      var preSrcId = srcIds(0)
+      val uniqueSrcIds = ArrayBuffer(preSrcId)
+      val dstCounts = ArrayBuffer(1)
+      var i = 1
+      var j = 0
+      while (i < sz) {
+        val srcId = srcIds(i)
+        if (srcId != preSrcId) {
+          uniqueSrcIds += srcId
+          dstCounts += 0
+          preSrcId = srcId
+          j += 1
+        }
+        dstCounts(j) += 1
+        i += 1
+      }
+      val dstPtrs = dstCounts.scanLeft(0)(_ + _).toArray
+      InBlock(uniqueSrcIds.toArray, dstPtrs, dstBlockIds.toArray, dstLocalIndices.toArray, ratings.toArray)
+    }
+
+    private def sort(): Unit = {
+      val sorter = new Sorter(new LocalRatingBlockSort)
+      sorter.sort(this, 0, size, Ordering[(Int, Short, Int)])
+    }
+
+    override def toString: String = {
+      "srcIds: " + srcIds.toSeq + "\n" +
+          "dstBlockIds: " + dstBlockIds.toSeq + "\n" +
+          "dstLocalIndices: " + dstLocalIndices.toSeq + "\n" +
+          "ratings: " + ratings.toSeq
+    }
+  }
+
+  class LocalRatingBlockSort extends SortDataFormat[(Int, Short, Int), UncompressedBlock] {
+
+    override protected def getKey(data: UncompressedBlock, pos: Int): (Int, Short, Int) = {
+      (data.srcIds(pos), data.dstBlockIds(pos), data.dstLocalIndices(pos))
+    }
+
+    private def swapElements[T](data: Array[T], pos0: Int, pos1: Int): Unit = {
+      val tmp = data(pos0)
+      data(pos0) = data(pos1)
+      data(pos1) = tmp
+    }
+
+    override protected def swap(data: UncompressedBlock, pos0: Int, pos1: Int): Unit = {
+      swapElements(data.srcIds, pos0, pos1)
+      swapElements(data.dstBlockIds, pos0, pos1)
+      swapElements(data.dstLocalIndices, pos0, pos1)
+      swapElements(data.ratings, pos0, pos1)
+    }
+
+    override protected def copyRange(
+        src: UncompressedBlock,
+        srcPos: Int,
+        dst: UncompressedBlock,
+        dstPos: Int,
+        length: Int): Unit = {
+      System.arraycopy(src.srcIds, srcPos, dst.srcIds, dstPos, length)
+      System.arraycopy(src.dstBlockIds, srcPos, dst.dstBlockIds, dstPos, length)
+      System.arraycopy(src.dstLocalIndices, srcPos, dst.dstLocalIndices, dstPos, length)
+      System.arraycopy(src.ratings, srcPos, dst.ratings, dstPos, length)
+    }
+
+    override protected def allocate(length: Int): UncompressedBlock = {
+      new UncompressedBlock(new Array[Int](length), new Array[Short](length), new Array[Int](length), new Array[Float](length))
+    }
+
+    override protected def copyElement(
+        src: UncompressedBlock,
+        srcPos: Int,
+        dst: UncompressedBlock,
+        dstPos: Int): Unit = {
+      dst.srcIds(dstPos) = src.srcIds(srcPos)
+      dst.dstBlockIds(dstPos) = src.dstBlockIds(srcPos)
+      dst.dstLocalIndices(dstPos) = src.dstLocalIndices(srcPos)
+      dst.ratings(dstPos) = src.ratings(srcPos)
+    }
+  }
+
   def makeBlocks(
       prefix: String,
       ratingBlocks: RDD[((Int, Int), RatingBlock)],
       srcPart: Partitioner,
       dstPart: Partitioner): (RDD[(Int, InBlock)], RDD[OutBlock]) = {
-    val inBlocks = ratingBlocks.map { case ((srcBlockId, dstBlockId), RatingBlock(srcIds, dstIds, localRatings)) =>
+    val inBlocks = ratingBlocks.map { case ((srcBlockId, dstBlockId), RatingBlock(srcIds, dstIds, ratings)) =>
       val dstIdToLocalIndex = dstIds.toSet.toSeq.sorted.zipWithIndex.toMap
       val dstLocalIndices = dstIds.map(dstIdToLocalIndex.apply)
-      (srcBlockId, (dstBlockId, srcIds, dstLocalIndices, localRatings))
+      (srcBlockId, (dstBlockId, srcIds, dstLocalIndices, ratings))
     }.groupByKey(new IdentityPartitioner(srcPart.numPartitions))
         .mapValues { iter =>
-      // TODO: use better sort
-      val entries = iter.flatMap { case (dstBlockId, theSrcIds, theDstLocalIndices, theLocalRatings) =>
-        (0 until theSrcIds.size).map { i =>
-          (theSrcIds(i), dstBlockId.toShort, theDstLocalIndices(i), theLocalRatings(i))
-        }
-      }.toSeq.sorted
-      val size = entries.size
-      val srcIds = ArrayBuffer.empty[Int]
-      val dstCounts = ArrayBuffer.empty[Int]
-      val dstBlockIds = new Array[Short](size)
-      val dstLocalIndices = new Array[Int](size)
-      val localRatings = new Array[Float](size)
-      var i = 0
-      var j = -1
-      entries.foreach { case (srcId, dstBlockId, dstLocalIndex, rating) =>
-        if (srcIds.isEmpty || srcId != srcIds.last) {
-          srcIds += srcId
-          dstCounts += 0
-          j += 1
-        }
-        dstCounts(j) += 1
-        dstBlockIds(i) = dstBlockId
-        dstLocalIndices(i) = dstLocalIndex
-        localRatings(i) = rating
-        i += 1
+      val uncompressedBlockBuilder = new UncompressedBlockBuilder
+      iter.foreach { case (dstBlockId, srcIds, dstLocalIndices, ratings) =>
+        uncompressedBlockBuilder.add(dstBlockId.toShort, srcIds, dstLocalIndices, ratings)
       }
-      val dstPtrs = dstCounts.scanLeft(0)(_ + _).toArray
-      InBlock(srcIds.toArray, dstPtrs, dstBlockIds, dstLocalIndices, localRatings)
+      uncompressedBlockBuilder.build().compress()
     }.setName(prefix + "InBlocks").cache()
     val outBlocks = inBlocks.mapValues { case InBlock(srcIds, dstPtrs, dstBlockIds, _, _) =>
       val activeIds = Array.fill(dstPart.numPartitions)(ArrayBuffer.empty[Int])
