@@ -1,10 +1,10 @@
-package als
+package org.apache.spark.ml
 
 import com.github.fommil.netlib.BLAS.{getInstance => blas}
 import org.apache.spark.SparkContext._
-import org.apache.spark.{SparkContext, SparkConf}
 import org.apache.spark.mllib.recommendation.{ALS => MLlibALS}
-import org.scalatest.{FunSuite, BeforeAndAfterAll}
+import org.apache.spark.{SparkConf, SparkContext}
+import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
 class SimpleALSSuite extends FunSuite with BeforeAndAfterAll {
 
@@ -28,7 +28,7 @@ class SimpleALSSuite extends FunSuite with BeforeAndAfterAll {
       .map { case Array(u, p, r, t) =>
       (u.toInt, p.toInt, r.toFloat)
     }
-    val Array(training, test) = ratings.randomSplit(Array(0.8, 0.2))
+    val Array(training, test) = ratings.randomSplit(Array(0.8, 0.2), 0L)
     training.cache()
     val simpleAls = new SimpleALS
     val k = 20

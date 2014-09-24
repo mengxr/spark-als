@@ -1,16 +1,17 @@
-package als
+package org.apache.spark.ml
 
+import als.{GridPartitioner, IdentityPartitioner, LeastSquares}
 import com.github.fommil.netlib.BLAS.{getInstance => blas}
+import org.apache.spark.SparkContext._
+import org.apache.spark.rdd.RDD
+import org.apache.spark.{HashPartitioner, Partitioner}
+import org.apache.spark.util.collection.{SortDataFormat, Sorter}
 
 import scala.collection.mutable.ArrayBuffer
 
-import org.apache.spark.{Partitioner, HashPartitioner}
-import org.apache.spark.SparkContext._
-import org.apache.spark.rdd.RDD
-
 class SimpleALS {
 
-  import SimpleALS._
+  import org.apache.spark.ml.SimpleALS._
 
   def run(ratings: RDD[(Int, Int, Float)], k: Int = 10, numBlocks: Int = 10, numIterations: Int = 10): (RDD[(Int, Array[Float])], RDD[(Int, Array[Float])]) = {
     val userPart = new HashPartitioner(numBlocks)
@@ -123,7 +124,7 @@ object SimpleALS {
         val idx = gridPart.getPartition((srcId, dstId))
         val block = blocks(idx)
         block.add(srcId, dstId, rating)
-        if (block.size >= (1 << 16)) { // 512k
+        if (block.size >= 2048) { // 2048 * (3 * 4) = 24k
           blocks(idx) = new BufferedRatingBlock
           val Array(srcBlockId, dstBlockId) = gridPart.indices(idx)
           Iterator.single(((srcBlockId, dstBlockId), block.toRatingBlock))
