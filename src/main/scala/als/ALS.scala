@@ -36,24 +36,31 @@ class ALS {
   }
 }
 
-class LeastSquares(k: Int) {
+class LeastSquares(val k: Int) {
 
-  val ata = new Array[Float](k * (k + 1) / 2)
-  val atb = new Array[Float](k)
+  val triK = k * (k + 1) / 2
+  val ata = new Array[Double](triK)
+  val atb = new Array[Double](k)
+  val da = new Array[Double](k)
   var n = 0
 
   import LeastSquares._
 
   def add(a: Array[Float], b: Float): this.type = {
-    blas.sspr("U", a.length, 1.0f, a, 1, ata)
-    blas.saxpy(a.length, b, a, 1, atb, 1)
+    var i = 0
+    while (i < k) {
+      da(i) = a(i)
+      i += 1
+    }
+    blas.dspr("U", k, 1.0, da, 1, ata)
+    blas.daxpy(k, b.toDouble, da, 1, atb, 1)
     n += 1
     this
   }
 
   def merge(other: LeastSquares): this.type = {
-    blas.saxpy(ata.length, 1.0f, other.ata, 1, ata, 1)
-    blas.saxpy(atb.length, 1.0f, other.atb, 1, atb, 1)
+    blas.daxpy(ata.size, 1.0, other.ata, 1, ata, 1)
+    blas.daxpy(atb.size, 1.0, other.atb, 1, atb, 1)
     n += other.n
     this
   }
@@ -62,23 +69,23 @@ class LeastSquares(k: Int) {
     val scaledlambda = lambda * n
     var i = 0
     var j = 2
-    while (i < ata.size) {
+    while (i < triK) {
       ata(i) += scaledlambda
       i += j
       j += 1
     }
-    val x = atb.clone()
     val info = new intW(0)
-    lapack.sppsv("U", atb.length, 1, ata, x, atb.length, info)
+    lapack.dppsv("U", k, 1, ata, atb, k, info)
     val code = info.`val`
     assert(code == 0, s"lapack.sppsv returned $code.")
+    val x = atb.map(_.toFloat)
     reset()
     x
   }
 
   def reset(): Unit = {
-    util.Arrays.fill(ata, 0.0f)
-    util.Arrays.fill(atb, 0.0f)
+    util.Arrays.fill(ata, 0.0)
+    util.Arrays.fill(atb, 0.0)
     n = 0
   }
 }
