@@ -1,6 +1,5 @@
 package org.apache.spark.ml
 
-import java.nio.{ByteBuffer, IntBuffer}
 import java.{util => javaUtil}
 
 import als.{GridPartitioner, IdentityPartitioner, LeastSquares}
@@ -8,8 +7,8 @@ import com.github.fommil.netlib.BLAS.{getInstance => blas}
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{Logging, HashPartitioner, Partitioner}
-import org.apache.spark.util.collection.{OpenHashMap, OpenHashSet, SortDataFormat}
-import org.apache.spark.ml.util.Sorter
+import org.apache.spark.util.collection.{OpenHashMap, OpenHashSet}
+import org.apache.spark.ml.util.{Sorter, SortDataFormat, IntComparator}
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -245,7 +244,12 @@ object SimpleALS {
 
     private def timSort(): Unit = {
       val sorter = new Sorter(new LocalRatingBlockSort)
-      sorter.sort(this, 0, size, Ordering[Int])
+      val comparator = new IntComparator {
+        override def compare(o1: Int, o2: Int): Int = {
+          java.lang.Integer.compare(o1, o2)
+        }
+      }
+      sorter.sort(this, 0, size, comparator)
     }
 
     private def scalaSort(): Unit = {
@@ -267,8 +271,8 @@ object SimpleALS {
       val sz = size
       println("size: " + sz)
       val start = System.nanoTime()
-      indexSort()
-      // timSort()
+      // indexSort()
+      timSort()
       // scalaSort()
       println("sort uncompressed time: " + (System.nanoTime() - start) / 1e9)
     }
@@ -281,7 +285,7 @@ object SimpleALS {
     }
   }
 
-  class LocalRatingBlockSort extends SortDataFormat[Int, UncompressedBlock] {
+  class LocalRatingBlockSort extends SortDataFormat[UncompressedBlock] {
 
     override protected def getKey(data: UncompressedBlock, pos: Int): Int = {
       data.srcIds(pos)

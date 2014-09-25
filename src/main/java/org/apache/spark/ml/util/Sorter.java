@@ -17,10 +17,6 @@
 
 package org.apache.spark.ml.util;
 
-import java.util.Comparator;
-
-import org.apache.spark.util.collection.SortDataFormat;
-
 /**
  * A port of the Android Timsort class, which utilizes a "stable, adaptive, iterative mergesort."
  * See the method comment on sort() for more details.
@@ -33,7 +29,7 @@ import org.apache.spark.util.collection.SortDataFormat;
  * uses this to sort an Array with alternating elements of the form [key, value, key, value].
  * This generalization comes with minimal overhead -- see SortDataFormat for more information.
  */
-public class Sorter<K, Buffer> {
+public class Sorter<Buffer> {
 
   /**
    * This is the minimum sized sequence that will be merged.  Shorter
@@ -54,9 +50,9 @@ public class Sorter<K, Buffer> {
    */
   private static final int MIN_MERGE = 32;
 
-  private final SortDataFormat<K, Buffer> s;
+  private final SortDataFormat<Buffer> s;
 
-  public Sorter(SortDataFormat<K, Buffer> sortDataFormat) {
+  public Sorter(SortDataFormat<Buffer> sortDataFormat) {
     this.s = sortDataFormat;
   }
 
@@ -93,7 +89,7 @@ public class Sorter<K, Buffer> {
    *
    * @author Josh Bloch
    */
-  public void sort(Buffer a, int lo, int hi, Comparator<? super K> c) {
+  public void sort(Buffer a, int lo, int hi, IntComparator c) {
     assert c != null;
 
     int nRemaining  = hi - lo;
@@ -159,7 +155,7 @@ public class Sorter<K, Buffer> {
    * @param c comparator to used for the sort
    */
   @SuppressWarnings("fallthrough")
-  private void binarySort(Buffer a, int lo, int hi, int start, Comparator<? super K> c) {
+  private void binarySort(Buffer a, int lo, int hi, int start, IntComparator c) {
     assert lo <= start && start <= hi;
     if (start == lo)
       start++;
@@ -167,7 +163,7 @@ public class Sorter<K, Buffer> {
     Buffer pivotStore = s.allocate(1);
     for ( ; start < hi; start++) {
       s.copyElement(a, start, pivotStore, 0);
-      K pivot = s.getKey(pivotStore, 0);
+      int pivot = s.getKey(pivotStore, 0);
 
       // Set left (and right) to the index where a[start] (pivot) belongs
       int left = lo;
@@ -231,7 +227,7 @@ public class Sorter<K, Buffer> {
    * @return  the length of the run beginning at the specified position in
    *          the specified array
    */
-  private int countRunAndMakeAscending(Buffer a, int lo, int hi, Comparator<? super K> c) {
+  private int countRunAndMakeAscending(Buffer a, int lo, int hi, IntComparator c) {
     assert lo < hi;
     int runHi = lo + 1;
     if (runHi == hi)
@@ -308,7 +304,7 @@ public class Sorter<K, Buffer> {
     /**
      * The comparator for this sort.
      */
-    private final Comparator<? super K> c;
+    private final IntComparator c;
 
     /**
      * When we get into galloping mode, we stay there until both runs win less
@@ -362,7 +358,7 @@ public class Sorter<K, Buffer> {
      * @param a the array to be sorted
      * @param c the comparator to determine the order of the sort
      */
-    private SortState(Buffer a, Comparator<? super K> c, int len) {
+    private SortState(Buffer a, IntComparator c, int len) {
       this.aLength = len;
       this.a = a;
       this.c = c;
@@ -515,7 +511,7 @@ public class Sorter<K, Buffer> {
      *    the first k elements of a should precede key, and the last n - k
      *    should follow it.
      */
-    private int gallopLeft(K key, Buffer a, int base, int len, int hint, Comparator<? super K> c) {
+    private int gallopLeft(int key, Buffer a, int base, int len, int hint, IntComparator c) {
       assert len > 0 && hint >= 0 && hint < len;
       int lastOfs = 0;
       int ofs = 1;
@@ -584,7 +580,7 @@ public class Sorter<K, Buffer> {
      * @param c the comparator used to order the range, and to search
      * @return the int k,  0 <= k <= n such that a[b + k - 1] <= key < a[b + k]
      */
-    private int gallopRight(K key, Buffer a, int base, int len, int hint, Comparator<? super K> c) {
+    private int gallopRight(int key, Buffer a, int base, int len, int hint, IntComparator c) {
       assert len > 0 && hint >= 0 && hint < len;
 
       int ofs = 1;
@@ -681,7 +677,7 @@ public class Sorter<K, Buffer> {
         return;
       }
 
-      Comparator<? super K> c = this.c;  // Use local variable for performance
+      IntComparator c = this.c;  // Use local variable for performance
       int minGallop = this.minGallop;    //  "    "       "     "      "
       outer:
       while (true) {
@@ -800,7 +796,7 @@ public class Sorter<K, Buffer> {
         return;
       }
 
-      Comparator<? super K> c = this.c;  // Use local variable for performance
+      IntComparator c = this.c;  // Use local variable for performance
       int minGallop = this.minGallop;    //  "    "       "     "      "
       outer:
       while (true) {
