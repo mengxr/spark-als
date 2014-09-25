@@ -23,16 +23,20 @@ class SimpleALSSuite extends FunSuite with BeforeAndAfterAll {
   }
 
   test("SimpleALS") {
-    val ratings = sc.textFile("/Users/meng/share/data/movielens/ml-1m/ratings.dat")
+    val ratings = sc.textFile("/Users/meng/share/data/movielens/ml-1m/ratings.dat", 2)
         .map(_.split("::"))
-      .map { case Array(u, p, r, t) =>
-      (u.toInt, p.toInt, r.toFloat)
+      .flatMap { case Array(u, p, r, t) =>
+      (0 until 1).map { i =>
+        (u.toInt + i, p.toInt, r.toFloat)
+      }
     }
     val Array(training, test) = ratings.randomSplit(Array(0.8, 0.2), 0L)
-    training.cache()
     val simpleAls = new SimpleALS
     val k = 20
-    val (userFactors, prodFactors) = simpleAls.run(training, k = k, numBlocks = 10, numIterations = 20)
+    val start = System.nanoTime()
+    val (userFactors, prodFactors) = simpleAls.run(training, k = k, numBlocks = 2, numIterations = 10)
+    val end = System.nanoTime()
+    println("Time: " + (end - start) / 1e9)
     val predictionAndRatings = test.map(x => (x._1, (x._2, x._3))).join(userFactors).map { case (userId, ((prodId, rating), userFactor)) =>
       (prodId, (rating, userFactor))
     }.join(prodFactors).values.map { case ((rating, userFactor), prodFactor) =>

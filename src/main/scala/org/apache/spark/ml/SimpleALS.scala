@@ -1,18 +1,19 @@
 package org.apache.spark.ml
 
-import java.util.Comparator
+import java.nio.{ByteBuffer, IntBuffer}
+import java.{util => javaUtil}
 
 import als.{GridPartitioner, IdentityPartitioner, LeastSquares}
 import com.github.fommil.netlib.BLAS.{getInstance => blas}
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
-import org.apache.spark.{HashPartitioner, Partitioner}
-import org.apache.spark.util.collection.SortDataFormat
+import org.apache.spark.{Logging, HashPartitioner, Partitioner}
+import org.apache.spark.util.collection.{OpenHashMap, OpenHashSet, SortDataFormat}
 import org.apache.spark.ml.util.Sorter
 
 import scala.collection.mutable.ArrayBuffer
 
-class SimpleALS {
+class SimpleALS extends Logging {
 
   import org.apache.spark.ml.SimpleALS._
 
@@ -176,10 +177,10 @@ object SimpleALS {
   }
 
   class UncompressedBlock(
-      var srcIds: Array[Int],
-      var dstBlockIds: Array[Short],
-      var dstLocalIndices: Array[Int],
-      var ratings: Array[Float]) {
+      val srcIds: Array[Int],
+      val dstBlockIds: Array[Short],
+      val dstLocalIndices: Array[Int],
+      val ratings: Array[Float]) {
 
     def size: Int = srcIds.size
 
@@ -207,9 +208,69 @@ object SimpleALS {
       InBlock(uniqueSrcIds.toArray, dstPtrs, dstBlockIds.toArray, dstLocalIndices.toArray, ratings.toArray)
     }
 
-    private def sort(): Unit = {
+    private def indexSort(): Unit = {
+      val sz = size
+
+      val indices = new Array[Int](sz)
+      var i = 0
+      while (i < sz) {
+        indices(i) = i
+        i += 1
+      }
+      def ord(i0: Int, i1: Int): Boolean = {
+        srcIds(i0) < srcIds(i1)
+      }
+      val sortedIndices = indices.sortWith(ord)
+
+      val sortedSrcIds = new Array[Int](sz)
+      val sortedDstBlockIds = new Array[Short](sz)
+      val sortedDstLocalIndices = new Array[Int](sz)
+      val sortedRatings = new Array[Float](sz)
+
+      i = 0
+      while (i < sz) {
+        val idx = sortedIndices(i)
+        sortedSrcIds(i) = srcIds(idx)
+        sortedDstBlockIds(i) = dstBlockIds(idx)
+        sortedDstLocalIndices(i) = dstLocalIndices(idx)
+        sortedRatings(i) = ratings(idx)
+        i += 1
+      }
+
+      System.arraycopy(sortedSrcIds, 0, srcIds, 0, sz)
+      System.arraycopy(sortedDstBlockIds, 0, dstBlockIds, 0, sz)
+      System.arraycopy(sortedDstLocalIndices, 0, dstLocalIndices, 0, sz)
+      System.arraycopy(sortedRatings, 0, ratings, 0, sz)
+    }
+
+    private def timSort(): Unit = {
       val sorter = new Sorter(new LocalRatingBlockSort)
-      sorter.sort(this, 0, size, Ordering[(Int, Short, Int)])
+      sorter.sort(this, 0, size, Ordering[Int])
+    }
+
+    private def scalaSort(): Unit = {
+      val sz = size
+      val sorted = (0 until sz).map { i =>
+        (srcIds(i), dstBlockIds(i), dstLocalIndices(i), ratings(i))
+      }.sortBy(_._1)
+      var i = 0
+      sorted.foreach { case (srcId, dstBlockId, dstLocalIndex, rating) =>
+        srcIds(i) = srcId
+        dstBlockIds(i) = dstBlockId
+        dstLocalIndices(i) = dstLocalIndex
+        ratings(i) = rating
+        i += 1
+      }
+    }
+
+    private def sort(): Unit = {
+      val sz = size
+      println("size: " + sz)
+      val start = System.nanoTime()
+      indexSort()
+      // timSort()
+      // scalaSort()
+      println("sort uncompressed time: " + (System.nanoTime() - start) / 1e9)
     }
 
     override def toString: String = {
@@ -220,13 +281,13 @@ object SimpleALS {
     }
   }
 
-  class LocalRatingBlockSort extends SortDataFormat[(Int, Short, Int), UncompressedBlock] {
+  class LocalRatingBlockSort extends SortDataFormat[Int, UncompressedBlock] {
 
-    override protected def getKey(data: UncompressedBlock, pos: Int): (Int, Short, Int) = {
-      (data.srcIds(pos), data.dstBlockIds(pos), data.dstLocalIndices(pos))
+    override protected def getKey(data: UncompressedBlock, pos: Int): Int = {
+      data.srcIds(pos)
     }
 
-    private def swapElements[T](data: Array[T], pos0: Int, pos1: Int): Unit = {
+    private def swapElements[@specialized(Int, Float, Short) T](data: Array[T], pos0: Int, pos1: Int): Unit = {
       val tmp = data(pos0)
       data(pos0) = data(pos1)
       data(pos1) = tmp
@@ -273,7 +334,21 @@ object SimpleALS {
       srcPart: Partitioner,
       dstPart: Partitioner): (RDD[(Int, InBlock)], RDD[OutBlock]) = {
     val inBlocks = ratingBlocks.map { case ((srcBlockId, dstBlockId), RatingBlock(srcIds, dstIds, ratings)) =>
-      val dstIdToLocalIndex = dstIds.toSet.toSeq.sorted.zipWithIndex.toMap
+      // faster version of
+      var start = System.nanoTime()
+      // val slowDstIdToLocalIndex = dstIds.toSet.toSeq.sorted.zipWithIndex.toMap
+      // println("slow sort time: " + (System.nanoTime() - start) / 1e9)
+      // start = System.nanoTime()
+      val dstIdSet = new OpenHashSet[Int](1 << 20)
+      dstIds.foreach(dstIdSet.add)
+      val sortedDstIds = dstIdSet.iterator.toArray.sorted
+      val dstIdToLocalIndex = new OpenHashMap[Int, Int](sortedDstIds.size)
+      var i = 0
+      while (i < sortedDstIds.size) {
+        dstIdToLocalIndex.update(sortedDstIds(i), i)
+        i += 1
+      }
+      println("fast sort time: " + (System.nanoTime() - start) / 1e9)
       val dstLocalIndices = dstIds.map(dstIdToLocalIndex.apply)
       (srcBlockId, (dstBlockId, srcIds, dstLocalIndices, ratings))
     }.groupByKey(new IdentityPartitioner(srcPart.numPartitions))
@@ -287,14 +362,15 @@ object SimpleALS {
     val outBlocks = inBlocks.mapValues { case InBlock(srcIds, dstPtrs, dstBlockIds, _, _) =>
       val activeIds = Array.fill(dstPart.numPartitions)(ArrayBuffer.empty[Int])
       var i = 0
+      val seen = new Array[Boolean](dstPart.numPartitions)
       while (i < srcIds.size) {
         var j = dstPtrs(i)
-        var preDstBlockId: Short = -1
+        javaUtil.Arrays.fill(seen, false)
         while (j < dstPtrs(i + 1)) {
           val dstBlockId = dstBlockIds(j)
-          if (dstBlockId != preDstBlockId) {
+          if (!seen(dstBlockId)) {
             activeIds(dstBlockId) += i
-            preDstBlockId = dstBlockId
+            seen(dstBlockId) = true
           }
           j += 1
         }
