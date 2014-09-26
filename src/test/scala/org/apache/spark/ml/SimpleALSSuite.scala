@@ -22,13 +22,13 @@ class SimpleALSSuite extends FunSuite with BeforeAndAfterAll {
   }
 
   test("SimpleALS") {
-    val ratings = sc.textFile("/Users/meng/share/data/movielens/ml-10M100K/ratings.dat", 4)
+    val ratings = sc.textFile("/Users/meng/share/data/movielens/ml-1m/ratings.dat", 2)
         .map(s => Rating.parseRating(s, "::"))
     val Array(training, test) = ratings.randomSplit(Array(0.8, 0.2), 0L)
     val simpleAls = new SimpleALS
-    val k = 10
+    val k = 40
     val start = System.nanoTime()
-    val (userFactors, prodFactors) = simpleAls.run(training, k = k, numBlocks = 2, numIterations = 20)
+    val (userFactors, prodFactors) = simpleAls.run(training, k = k, numBlocks = 2, numIterations = 30)
     val end = System.nanoTime()
     println("Time: " + (end - start) / 1e9)
     // throw new RuntimeException

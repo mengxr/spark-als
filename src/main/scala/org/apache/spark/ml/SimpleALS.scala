@@ -6,6 +6,7 @@ import als.{GridPartitioner, IdentityPartitioner, LeastSquares}
 import com.github.fommil.netlib.BLAS.{getInstance => blas}
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
+import org.apache.spark.util.random.XORShiftRandom
 import org.apache.spark.{Logging, HashPartitioner, Partitioner}
 import org.apache.spark.util.collection.{OpenHashMap, OpenHashSet}
 import org.apache.spark.ml.util.{Sorter, SortDataFormat, IntComparator}
@@ -85,9 +86,9 @@ object SimpleALS {
 
   def initialize(inBlocks: RDD[(Int, InBlock)], k: Int): RDD[FactorBlock] = {
     inBlocks.map { case (srcBlockId, inBlock) =>
-      val random = new java.util.Random(srcBlockId)
+      val random = new XORShiftRandom(srcBlockId)
       val factors = Array.fill(inBlock.srcIds.size) {
-        val factor = Array.fill(k)(random.nextFloat())
+        val factor = Array.fill(k)(random.nextGaussian().toFloat)
         val nrm = blas.snrm2(k, factor, 1)
         blas.sscal(k, 1.0f / nrm, factor, 1)
         factor
@@ -108,20 +109,6 @@ object SimpleALS {
       srcIds += r.user
       dstIds += r.product
       ratings += r.rating
-      this
-    }
-
-    def add(srcId: Int, dstId: Int, rating: Float): this.type = {
-      srcIds += srcId
-      dstIds += dstId
-      ratings += rating
-      this
-    }
-
-    def merge(other: BufferedRatingBlock): this.type = {
-      srcIds ++= other.srcIds
-      dstIds ++= other.dstIds
-      ratings ++= other.ratings
       this
     }
 
@@ -291,7 +278,7 @@ object SimpleALS {
 
     override def toString: String = {
       "srcIds: " + srcIds.toSeq + "\n" +
-          "dstEncodedLocalIndices: " + dstEncodedLocalIndices + "\n" +
+          "dstEncodedLocalIndices: " + dstEncodedLocalIndices.toSeq + "\n" +
           "ratings: " + ratings.toSeq
     }
   }
@@ -359,7 +346,9 @@ object SimpleALS {
       while (pos != -1) {
         sortedDstIds(i) = dstIdSet.getValue(pos)
         pos = dstIdSet.nextPos(pos + 1)
+        i += 1
       }
+      assert(i == dstIdSet.size)
       javaUtil.Arrays.sort(sortedDstIds)
       val dstIdToLocalIndex = new OpenHashMap[Int, Int](sortedDstIds.size)
       i = 0
