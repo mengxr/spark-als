@@ -43,6 +43,8 @@ class LeastSquares(val k: Int) {
   val atb = new Array[Double](k)
   val da = new Array[Double](k)
   var n = 0
+  val info = new intW(0)
+  val upper = "U"
 
   import LeastSquares._
 
@@ -52,7 +54,7 @@ class LeastSquares(val k: Int) {
       da(i) = a(i)
       i += 1
     }
-    blas.dspr("U", k, 1.0, da, 1, ata)
+    blas.dspr(upper, k, 1.0, da, 1, ata)
     blas.daxpy(k, b.toDouble, da, 1, atb, 1)
     n += 1
     this
@@ -74,11 +76,15 @@ class LeastSquares(val k: Int) {
       i += j
       j += 1
     }
-    val info = new intW(0)
-    lapack.dppsv("U", k, 1, ata, atb, k, info)
+    lapack.dppsv(upper, k, 1, ata, atb, k, info)
     val code = info.`val`
     assert(code == 0, s"lapack.sppsv returned $code.")
-    val x = atb.map(_.toFloat)
+    val x = new Array[Float](k)
+    i = 0
+    while (i < k) {
+      x(i) = atb(i).toFloat
+      i += 1
+    }
     reset()
     x
   }

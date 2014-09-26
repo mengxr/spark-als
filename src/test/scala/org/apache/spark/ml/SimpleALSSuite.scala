@@ -2,7 +2,6 @@ package org.apache.spark.ml
 
 import com.github.fommil.netlib.BLAS.{getInstance => blas}
 import org.apache.spark.SparkContext._
-import org.apache.spark.mllib.recommendation.{ALS => MLlibALS}
 import org.apache.spark.{SparkConf, SparkContext}
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
@@ -23,21 +22,17 @@ class SimpleALSSuite extends FunSuite with BeforeAndAfterAll {
   }
 
   test("SimpleALS") {
-    val ratings = sc.textFile("/Users/meng/share/data/movielens/ml-1m/ratings.dat", 1)
-        .map(_.split("::"))
-      .flatMap { case Array(u, p, r, t) =>
-      (0 until 10).map { i =>
-        (u.toInt + i, p.toInt, r.toFloat)
-      }
-    }
+    val ratings = sc.textFile("/Users/meng/share/data/movielens/ml-10M100K/ratings.dat", 4)
+        .map(s => Rating.parseRating(s, "::"))
     val Array(training, test) = ratings.randomSplit(Array(0.8, 0.2), 0L)
     val simpleAls = new SimpleALS
-    val k = 20
+    val k = 10
     val start = System.nanoTime()
-    val (userFactors, prodFactors) = simpleAls.run(training, k = k, numBlocks = 1, numIterations = 10)
+    val (userFactors, prodFactors) = simpleAls.run(training, k = k, numBlocks = 2, numIterations = 20)
     val end = System.nanoTime()
     println("Time: " + (end - start) / 1e9)
-    val predictionAndRatings = test.map(x => (x._1, (x._2, x._3))).join(userFactors).map { case (userId, ((prodId, rating), userFactor)) =>
+    // throw new RuntimeException
+    val predictionAndRatings = test.map(x => (x.user, (x.product, x.rating))).join(userFactors).map { case (userId, ((prodId, rating), userFactor)) =>
       (prodId, (rating, userFactor))
     }.join(prodFactors).values.map { case ((rating, userFactor), prodFactor) =>
       (blas.sdot(k, userFactor, 1, prodFactor, 1), rating)

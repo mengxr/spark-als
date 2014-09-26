@@ -12,11 +12,24 @@ import org.apache.spark.ml.util.{Sorter, SortDataFormat, IntComparator}
 
 import scala.collection.mutable.ArrayBuffer
 
+class Rating(val user: Int, val product: Int, val rating: Float) extends Serializable
+
+object Rating {
+  def parseRating(str: String, delimiter: String): Rating = {
+    val fields = str.split(delimiter)
+    assert(fields.size >= 3)
+    val user = java.lang.Integer.parseInt(fields(0))
+    val product = java.lang.Integer.parseInt(fields(1))
+    val rating = java.lang.Float.parseFloat(fields(2))
+    new Rating(user, product, rating)
+  }
+}
+
 class SimpleALS extends Logging {
 
   import org.apache.spark.ml.SimpleALS._
 
-  def run(ratings: RDD[(Int, Int, Float)], k: Int = 10, numBlocks: Int = 10, numIterations: Int = 10): (RDD[(Int, Array[Float])], RDD[(Int, Array[Float])]) = {
+  def run(ratings: RDD[Rating], k: Int = 10, numBlocks: Int = 10, numIterations: Int = 10): (RDD[(Int, Array[Float])], RDD[(Int, Array[Float])]) = {
     val userPart = new HashPartitioner(numBlocks)
     val prodPart = new HashPartitioner(numBlocks)
     val userLocalIndexEncoder = new LocalIndexEncoder(userPart.numPartitions)
@@ -91,6 +104,13 @@ object SimpleALS {
     private val dstIds: ArrayBuffer[Int] = ArrayBuffer.empty
     private val ratings: ArrayBuffer[Float] = ArrayBuffer.empty
 
+    def add(r: Rating): this.type = {
+      srcIds += r.user
+      dstIds += r.product
+      ratings += r.rating
+      this
+    }
+
     def add(srcId: Int, dstId: Int, rating: Float): this.type = {
       srcIds += srcId
       dstIds += dstId
@@ -119,14 +139,14 @@ object SimpleALS {
     }
   }
 
-  def blockifyRatings(ratings: RDD[(Int, Int, Float)], srcPart: Partitioner, dstPart: Partitioner): RDD[((Int, Int), RatingBlock)] = {
+  def blockifyRatings(ratings: RDD[Rating], srcPart: Partitioner, dstPart: Partitioner): RDD[((Int, Int), RatingBlock)] = {
     val gridPart = new GridPartitioner(Array(srcPart, dstPart))
     ratings.mapPartitions { iter =>
       val blocks = Array.fill(gridPart.numPartitions)(new BufferedRatingBlock)
-      iter.flatMap { case (srcId, dstId, rating) =>
-        val idx = gridPart.getPartition((srcId, dstId))
+      iter.flatMap { r =>
+        val idx = gridPart.getPartition((r.user, r.product))
         val block = blocks(idx)
-        block.add(srcId, dstId, rating)
+        block.add(r)
         if (block.size >= 2048) { // 2048 * (3 * 4) = 24k
           blocks(idx) = new BufferedRatingBlock
           val Array(srcBlockId, dstBlockId) = gridPart.indices(idx)
@@ -283,7 +303,7 @@ object SimpleALS {
       data.srcIds(pos)
     }
 
-    private def swapElements[@specialized(Int, Float, Short) T](data: Array[T], pos0: Int, pos1: Int): Unit = {
+    private def swapElements[@specialized(Int, Float) T](data: Array[T], pos0: Int, pos1: Int): Unit = {
       val tmp = data(pos0)
       data(pos0) = data(pos1)
       data(pos1) = tmp
@@ -334,9 +354,16 @@ object SimpleALS {
       // start = System.nanoTime()
       val dstIdSet = new OpenHashSet[Int](1 << 20)
       dstIds.foreach(dstIdSet.add)
-      val sortedDstIds = dstIdSet.iterator.toArray.sorted
-      val dstIdToLocalIndex = new OpenHashMap[Int, Int](sortedDstIds.size)
+      val sortedDstIds = new Array[Int](dstIdSet.size)
       var i = 0
+      var pos = dstIdSet.nextPos(0)
+      while (pos != -1) {
+        sortedDstIds(i) = dstIdSet.getValue(pos)
+        pos = dstIdSet.nextPos(pos + 1)
+      }
+      javaUtil.Arrays.sort(sortedDstIds)
+      val dstIdToLocalIndex = new OpenHashMap[Int, Int](sortedDstIds.size)
+      i = 0
       while (i < sortedDstIds.size) {
         dstIdToLocalIndex.update(sortedDstIds(i), i)
         i += 1
