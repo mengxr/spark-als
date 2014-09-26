@@ -26,12 +26,11 @@ class SimpleALSSuite extends FunSuite with BeforeAndAfterAll {
         .map(s => Rating.parseRating(s, "::"))
     val Array(training, test) = ratings.randomSplit(Array(0.8, 0.2), 0L)
     val simpleAls = new SimpleALS
-    val k = 40
+    val k = 10
     val start = System.nanoTime()
-    val (userFactors, prodFactors) = simpleAls.run(training, k = k, numBlocks = 2, numIterations = 30)
+    val (userFactors, prodFactors) = simpleAls.run(training, k = k, numBlocks = 2, numIterations = 10)
     val end = System.nanoTime()
     println("Time: " + (end - start) / 1e9)
-    // throw new RuntimeException
     val predictionAndRatings = test.map(x => (x.user, (x.product, x.rating))).join(userFactors).map { case (userId, ((prodId, rating), userFactor)) =>
       (prodId, (rating, userFactor))
     }.join(prodFactors).values.map { case ((rating, userFactor), prodFactor) =>
