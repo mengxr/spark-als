@@ -25,7 +25,7 @@ object Rating {
   }
 }
 
-class SimpleALS extends Logging {
+class SimpleALS extends Serializable {
 
   import org.apache.spark.ml.SimpleALS._
 
@@ -155,7 +155,6 @@ object SimpleALS {
           Iterator.empty
         }
       } ++ {
-        System.gc()
         blocks.view.zipWithIndex.filter(_._1.size > 0).map { case (block, idx) =>
           val Array(srcBlockId, dstBlockId) = gridPart.indices(idx)
           ((srcBlockId, dstBlockId), block.toRatingBlock)
@@ -377,7 +376,6 @@ object SimpleALS {
       iter.foreach { case (dstBlockId, srcIds, dstLocalIndices, ratings) =>
         uncompressedBlockBuilder.add(dstBlockId, srcIds, dstLocalIndices, ratings)
       }
-      System.gc()
       uncompressedBlockBuilder.build().compress()
     }.setName(prefix + "InBlocks").cache()
     val outBlocks = inBlocks.mapValues { case InBlock(srcIds, dstPtrs, dstEncodedLocalIndices, _) =>
