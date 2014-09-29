@@ -67,7 +67,7 @@ class LeastSquares(val k: Int) {
     this
   }
 
-  def solve(lambda: Float): Array[Float] = {
+  def solve(lambda: Double): Array[Float] = {
     val scaledlambda = lambda * n
     var i = 0
     var j = 2

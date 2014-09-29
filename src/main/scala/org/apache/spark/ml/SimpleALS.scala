@@ -30,7 +30,7 @@ class SimpleALS extends Serializable {
 
   import org.apache.spark.ml.SimpleALS._
 
-  def run(ratings: RDD[Rating], k: Int = 10, numBlocks: Int = 10, numIterations: Int = 10): (RDD[(Int, Array[Float])], RDD[(Int, Array[Float])]) = {
+  def run(ratings: RDD[Rating], k: Int = 10, numBlocks: Int = 10, numIterations: Int = 10, lambda: Double  = 1.0): (RDD[(Int, Array[Float])], RDD[(Int, Array[Float])]) = {
     val userPart = new HashPartitioner(numBlocks)
     val prodPart = new HashPartitioner(numBlocks)
     val userLocalIndexEncoder = new LocalIndexEncoder(userPart.numPartitions)
@@ -44,8 +44,8 @@ class SimpleALS extends Serializable {
     var userFactors = initialize(userInBlocks, k)
     var prodFactors = initialize(prodInBlocks, k)
     for (iter <- 0 until numIterations) {
-      prodFactors = computeFactors(userFactors, userOutBlocks, prodInBlocks, k, userLocalIndexEncoder)
-      userFactors = computeFactors(prodFactors, prodOutBlocks, userInBlocks, k, prodLocalIndexEncoder)
+      prodFactors = computeFactors(userFactors, userOutBlocks, prodInBlocks, k, lambda, userLocalIndexEncoder)
+      userFactors = computeFactors(prodFactors, prodOutBlocks, userInBlocks, k, lambda, prodLocalIndexEncoder)
     }
     val userIdAndFactors = userInBlocks.mapValues(_.srcIds).join(userFactors).values.cache()
     val prodIdAndFactors = prodInBlocks.mapValues(_.srcIds).join(prodFactors).values.cache()
@@ -395,6 +395,7 @@ object SimpleALS {
       srcOutBlocks: RDD[OutBlock],
       dstInBlocks: RDD[(Int, InBlock)],
       k: Int,
+      lambda: Double,
       srcEncoder: LocalIndexEncoder): RDD[FactorBlock] = {
     val srcOut = srcOutBlocks.join(srcFactorBlocks).flatMap { case (srcBlockId, (srcOutBlock, srcFactors)) =>
       srcOutBlock.view.zipWithIndex.map { case (activeIndices, dstBlockId) =>
@@ -414,7 +415,7 @@ object SimpleALS {
           ls.add(sortedSrcFactors(srcEncoder.blockId(encoded))(srcEncoder.localIndex(encoded)), ratings(i))
           i += 1
         }
-        dstFactors(j) = ls.solve(lambda = 0.1f)
+        dstFactors(j) = ls.solve(lambda = lambda)
         j += 1
       }
       dstFactors
