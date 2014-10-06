@@ -13,8 +13,6 @@ import org.apache.spark.{HashPartitioner, Partitioner}
 import org.apache.spark.util.collection.{OpenHashMap, OpenHashSet}
 import org.apache.spark.ml.util.{Sorter, SortDataFormat, IntComparator}
 
-import scala.collection.mutable.ArrayBuffer
-
 class Rating(val user: Int, val product: Int, val rating: Float) extends Serializable
 
 object Rating {
@@ -396,7 +394,7 @@ object SimpleALS {
     }.setName(prefix + "InBlocks").cache()
     val outBlocks = inBlocks.mapValues { case InBlock(srcIds, dstPtrs, dstEncodedIndices, _) =>
       val encoder = new LocalIndexEncoder(dstPart.numPartitions)
-      val activeIds = Array.fill(dstPart.numPartitions)(ArrayBuffer.empty[Int])
+      val activeIds = Array.fill(dstPart.numPartitions)(new IntArrayList())
       var i = 0
       val seen = new Array[Boolean](dstPart.numPartitions)
       while (i < srcIds.size) {
@@ -405,14 +403,17 @@ object SimpleALS {
         while (j < dstPtrs(i + 1)) {
           val dstBlockId = encoder.blockId(dstEncodedIndices(j))
           if (!seen(dstBlockId)) {
-            activeIds(dstBlockId) += i
+            activeIds(dstBlockId).add(i)
             seen(dstBlockId) = true
           }
           j += 1
         }
         i += 1
       }
-      activeIds.map(_.toArray)
+      activeIds.map { x =>
+        x.trimToSize()
+        x.elements()
+      }
     }.setName(prefix + "OutBlocks").cache()
     (inBlocks, outBlocks)
   }
