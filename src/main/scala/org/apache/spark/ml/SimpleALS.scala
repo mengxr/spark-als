@@ -2,6 +2,8 @@ package org.apache.spark.ml
 
 import java.{util => javaUtil}
 
+import cern.colt.list.{IntArrayList, FloatArrayList}
+
 import als.{GridPartitioner, IdentityPartitioner, LeastSquares}
 import com.github.fommil.netlib.BLAS.{getInstance => blas}
 import org.apache.spark.SparkContext._
@@ -43,6 +45,9 @@ class SimpleALS extends Serializable {
     val (prodInBlocks, prodOutBlocks) = makeBlocks("prod", swappedBlockRatings, prodPart, userPart)
     var userFactors = initialize(userInBlocks, k)
     var prodFactors = initialize(prodInBlocks, k)
+    // userFactors.count()
+    // prodFactors.count()
+    // Thread.sleep(10000)
     for (iter <- 0 until numIterations) {
       prodFactors = computeFactors(userFactors, userOutBlocks, prodInBlocks, k, lambda, userLocalIndexEncoder)
       userFactors = computeFactors(prodFactors, prodOutBlocks, userInBlocks, k, lambda, prodLocalIndexEncoder)
@@ -101,28 +106,36 @@ object SimpleALS {
 
   class BufferedRatingBlock extends Serializable {
 
-    private val srcIds: ArrayBuffer[Int] = ArrayBuffer.empty
-    private val dstIds: ArrayBuffer[Int] = ArrayBuffer.empty
-    private val ratings: ArrayBuffer[Float] = ArrayBuffer.empty
+    private val srcIds = new IntArrayList()
+    private val dstIds = new IntArrayList()
+    private val ratings = new FloatArrayList()
 
     def add(r: Rating): this.type = {
-      srcIds += r.user
-      dstIds += r.product
-      ratings += r.rating
+      srcIds.add(r.user)
+      dstIds.add(r.product)
+      ratings.add(r.rating)
       this
     }
 
     def merge(other: RatingBlock): this.type = {
-      srcIds ++= other.srcIds
-      dstIds ++= other.dstIds
-      ratings ++= other.localRatings
+      val sz = other.srcIds.size
+      var i = 0
+      while (i < sz) {
+        srcIds.add(other.srcIds(i))
+        dstIds.add(other.dstIds(i))
+        ratings.add(other.localRatings(i))
+        i += 1
+      }
       this
     }
 
     def size: Int = srcIds.size
 
     def toRatingBlock: RatingBlock = {
-      RatingBlock(srcIds.toArray, dstIds.toArray, ratings.toArray)
+      srcIds.trimToSize()
+      dstIds.trimToSize()
+      ratings.trimToSize()
+      RatingBlock(srcIds.elements(), dstIds.elements(), ratings.elements())
     }
   }
 
@@ -156,26 +169,29 @@ object SimpleALS {
 
   class UncompressedBlockBuilder(encoder: LocalIndexEncoder) {
 
-    val srcIds = ArrayBuffer.empty[Int]
-    val dstEncodedIndices = ArrayBuffer.empty[Int]
-    val ratings = ArrayBuffer.empty[Float]
+    val srcIds = new IntArrayList()
+    val dstEncodedIndices = new IntArrayList()
+    val ratings = new FloatArrayList()
 
     def add(theDstBlockId: Int, theSrcIds: Array[Int], theDstLocalIndices: Array[Int], theRatings: Array[Float]): this.type = {
       val sz = theSrcIds.size
       require(theDstLocalIndices.size == sz)
       require(theRatings.size == sz)
-      srcIds ++= theSrcIds
       var j = 0
       while (j < sz) {
-        dstEncodedIndices += encoder.encode(theDstBlockId, theDstLocalIndices(j))
+        srcIds.add(theSrcIds(j))
+        dstEncodedIndices.add(encoder.encode(theDstBlockId, theDstLocalIndices(j)))
+        ratings.add(theRatings(j))
         j += 1
       }
-      ratings ++= theRatings
       this
     }
 
     def build(): UncompressedBlock = {
-      new UncompressedBlock(srcIds.toArray, dstEncodedIndices.toArray, ratings.toArray)
+      srcIds.trimToSize()
+      dstEncodedIndices.trimToSize()
+      ratings.trimToSize()
+      new UncompressedBlock(srcIds.elements(), dstEncodedIndices.elements(), ratings.elements())
     }
   }
 
@@ -191,23 +207,34 @@ object SimpleALS {
       assert(sz > 0)
       sort()
       var preSrcId = srcIds(0)
-      val uniqueSrcIds = ArrayBuffer(preSrcId)
-      val dstCounts = ArrayBuffer(1)
+      val uniqueSrcIds = new IntArrayList()
+      uniqueSrcIds.add(preSrcId)
+      val dstCounts = new IntArrayList()
+      dstCounts.add(1)
       var i = 1
       var j = 0
       while (i < sz) {
         val srcId = srcIds(i)
         if (srcId != preSrcId) {
-          uniqueSrcIds += srcId
-          dstCounts += 0
+          uniqueSrcIds.add(srcId)
+          dstCounts.add(0)
           preSrcId = srcId
           j += 1
         }
-        dstCounts(j) += 1
+        dstCounts.setQuick(j, dstCounts.getQuick(j) + 1)
         i += 1
       }
-      val dstPtrs = dstCounts.scanLeft(0)(_ + _).toArray
-      InBlock(uniqueSrcIds.toArray, dstPtrs, dstEncodedIndices.toArray, ratings.toArray)
+      uniqueSrcIds.trimToSize()
+      val numUniqueSrdIds = uniqueSrcIds.size()
+      val dstPtrs = new Array[Int](numUniqueSrdIds + 1)
+      var sum = 0
+      i = 0
+      while (i < numUniqueSrdIds) {
+        sum += dstCounts.getQuick(i)
+        i += 1
+        dstPtrs(i) = sum
+      }
+      InBlock(uniqueSrcIds.elements(), dstPtrs, dstEncodedIndices, ratings)
     }
 
     private def indexSort(): Unit = {
