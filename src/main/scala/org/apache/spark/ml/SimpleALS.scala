@@ -37,15 +37,14 @@ class SimpleALS extends Serializable {
     val prodLocalIndexEncoder = new LocalIndexEncoder(prodPart.numPartitions)
     val blockRatings = blockifyRatings(ratings, userPart, prodPart).cache()
     val (userInBlocks, userOutBlocks) = makeBlocks("user", blockRatings, userPart, prodPart)
+    userOutBlocks.count()
     val swappedBlockRatings = blockRatings.map { case ((userBlockId, prodBlockId), RatingBlock(userIds, prodIds, localRatings)) =>
       ((prodBlockId, userBlockId), RatingBlock(prodIds, userIds, localRatings))
     }
     val (prodInBlocks, prodOutBlocks) = makeBlocks("prod", swappedBlockRatings, prodPart, userPart)
+    prodOutBlocks.count()
     var userFactors = initialize(userInBlocks, k)
     var prodFactors = initialize(prodInBlocks, k)
-    // userFactors.count()
-    // prodFactors.count()
-    // Thread.sleep(10000)
     for (iter <- 0 until numIterations) {
       prodFactors = computeFactors(userFactors, userOutBlocks, prodInBlocks, k, lambda, userLocalIndexEncoder)
       userFactors = computeFactors(prodFactors, prodOutBlocks, userInBlocks, k, lambda, prodLocalIndexEncoder)
@@ -403,7 +402,7 @@ object SimpleALS {
         while (j < dstPtrs(i + 1)) {
           val dstBlockId = encoder.blockId(dstEncodedIndices(j))
           if (!seen(dstBlockId)) {
-            activeIds(dstBlockId).add(i)
+            activeIds(dstBlockId).add(i) // add the index
             seen(dstBlockId) = true
           }
           j += 1
