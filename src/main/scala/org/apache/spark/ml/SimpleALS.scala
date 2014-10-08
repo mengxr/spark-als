@@ -448,25 +448,39 @@ object SimpleALS {
       dstFactors
     }
   }
+
+  /**
+   * Encoder for storing (blockId, localIndex) into a single integer.
+   *
+   * We use the leading bits (including the sign bit) to store the block id and the rest to store
+   * the local index. This is based on the assumption that users/products are approximately evenly
+   * partitioned. With this assumption, we should be able to encode two billion distinct values.
+   *
+   * @param numBlocks number of blocks
+   */
+  private class LocalIndexEncoder(numBlocks: Int) extends Serializable {
+
+    require(numBlocks > 0, s"numBlocks must be positive but found $numBlocks.")
+
+    private[this] final val numLocalIndexBits =
+      math.min(java.lang.Integer.numberOfLeadingZeros(numBlocks - 1), 31)
+    private[this] final val localIndexMask = (1 << numLocalIndexBits) - 1
+
+    def encode(blockId: Int, localIndex: Int): Int = {
+      require(blockId < numBlocks)
+      require((localIndex & ~localIndexMask) == 0)
+      (blockId << numLocalIndexBits) | localIndex
+    }
+
+    @inline
+    def blockId(encoded: Int): Int = {
+      encoded >>> numLocalIndexBits
+    }
+
+    @inline
+    def localIndex(encoded: Int): Int = {
+      encoded & localIndexMask
+    }
+  }
 }
 
-class LocalIndexEncoder(numBlocks: Int) extends Serializable {
-
-  require(numBlocks > 0)
-  private[this] final val numLocalIndexBits = math.min(java.lang.Integer.numberOfLeadingZeros(numBlocks - 1), 31)
-  private[this] final val localIndexMask = (1 << numLocalIndexBits) - 1
-
-  def encode(blockId: Int, localIndex: Int): Int = {
-    require(blockId < numBlocks)
-    require((localIndex & ~localIndexMask) == 0)
-    (blockId << numLocalIndexBits) | localIndex
-  }
-
-  def blockId(encoded: Int): Int = {
-    encoded >>> numLocalIndexBits
-  }
-
-  def localIndex(encoded: Int): Int = {
-    encoded & localIndexMask
-  }
-}
