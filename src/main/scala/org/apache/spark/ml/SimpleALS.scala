@@ -444,7 +444,7 @@ private object SimpleALS {
         val sortedSrcFactors = srcFactors.toSeq.sortBy(_._1).map(_._2).toArray
         val dstFactors = new Array[Array[Float]](dstIds.size)
         var j = 0
-        val ls = new LeastSquares(k)
+        val ls = new NormalEquation(k)
         while (j < dstIds.size) {
           var i = srcPtrs(j)
           while (i < srcPtrs(j + 1)) {

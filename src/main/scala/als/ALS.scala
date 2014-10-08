@@ -10,7 +10,7 @@ import com.github.fommil.netlib.F2jBLAS
 
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
-import org.apache.spark.ml.LeastSquares
+import org.apache.spark.ml.NormalEquation
 
 class ALS {
 
@@ -161,7 +161,7 @@ object ALS {
 
   case class AssignmentOutput(
      factors: mutable.ListBuffer[(Int, Array[Float])],
-     matrices: mutable.Map[Int, LeastSquares]) {
+     matrices: mutable.Map[Int, NormalEquation]) {
 
     def merge(other: AssignmentOutput): this.type = {
       factors ++= other.factors
@@ -191,12 +191,12 @@ object ALS {
     val assignmentOutputs = factors.join(assignments).values.flatMap { case (thisFactors, thisAssignments) =>
        thisAssignments.map { case Assignment(dstBlockId, directSrcIds, matrixDstIds, matrixSrcPtrs, matrixSrcIds, matrixRatings) =>
          val directFactors = directSrcIds.map(i => (i, thisFactors(i)))
-         val matrices = mutable.Map.empty[Int, LeastSquares] // TODO: append-only map
+         val matrices = mutable.Map.empty[Int, NormalEquation] // TODO: append-only map
          var j = 0
          while (j < matrixDstIds.length) {
            val dstId = matrixDstIds(j)
            var i = matrixSrcPtrs(j)
-           val ls = new LeastSquares(k)
+           val ls = new NormalEquation(k)
            while (i < matrixSrcPtrs(j + 1)) {
              val srcId = matrixSrcIds(i)
              ls.add(thisFactors(srcId), matrixRatings(i))
@@ -215,7 +215,7 @@ object ALS {
       var j = 0
       while (j < dstIds.length) {
         val dstId = dstIds(j)
-        val ls = matrices.getOrElse(dstId, new LeastSquares(k))
+        val ls = matrices.getOrElse(dstId, new NormalEquation(k))
         var i = directSrcPtrs(j)
         while (i < directSrcPtrs(j + 1)) {
           val srcId = directSrcIds(i)
