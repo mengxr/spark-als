@@ -99,9 +99,9 @@ object SimpleALS {
     }
   }
 
-  case class RatingBlock(srcIds: Array[Int], dstIds: Array[Int], localRatings: Array[Float])
+  case class RatingBlock(srcIds: Array[Int], dstIds: Array[Int], ratings: Array[Float])
 
-  class BufferedRatingBlock extends Serializable {
+  class RatingBlockBuilder extends Serializable {
 
     private val srcIds = new IntArrayList()
     private val dstIds = new IntArrayList()
@@ -120,7 +120,7 @@ object SimpleALS {
       while (i < sz) {
         srcIds.add(other.srcIds(i))
         dstIds.add(other.dstIds(i))
-        ratings.add(other.localRatings(i))
+        ratings.add(other.ratings(i))
         i += 1
       }
       this
@@ -139,13 +139,13 @@ object SimpleALS {
   def blockifyRatings(ratings: RDD[Rating], srcPart: Partitioner, dstPart: Partitioner): RDD[((Int, Int), RatingBlock)] = {
     val gridPart = new GridPartitioner(Array(srcPart, dstPart))
     ratings.mapPartitions { iter =>
-      val blocks = Array.fill(gridPart.numPartitions)(new BufferedRatingBlock)
+      val blocks = Array.fill(gridPart.numPartitions)(new RatingBlockBuilder)
       iter.flatMap { r =>
         val idx = gridPart.getPartition((r.user, r.product))
         val block = blocks(idx)
         block.add(r)
         if (block.size >= 2048) { // 2048 * (3 * 4) = 24k
-          blocks(idx) = new BufferedRatingBlock
+          blocks(idx) = new RatingBlockBuilder
           val Array(srcBlockId, dstBlockId) = gridPart.indices(idx)
           Iterator.single(((srcBlockId, dstBlockId), block.toRatingBlock))
         } else {
@@ -158,7 +158,7 @@ object SimpleALS {
         }
       }
     }.groupByKey().mapValues { iter =>
-      val buffered = new BufferedRatingBlock
+      val buffered = new RatingBlockBuilder
       iter.foreach(buffered.merge)
       buffered.toRatingBlock
     }.setName("blockRatings")
