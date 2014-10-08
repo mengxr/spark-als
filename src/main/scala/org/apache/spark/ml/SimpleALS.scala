@@ -1,5 +1,6 @@
 package org.apache.spark.ml
 
+import java.io.{IOException, ObjectOutputStream}
 import java.{util => javaUtil}
 
 import cern.colt.list.{IntArrayList, FloatArrayList}
@@ -68,25 +69,46 @@ class SimpleALS extends Serializable {
   }
 }
 
-object SimpleALS {
-
-  type FactorBlock = (Int, Array[Array[Float]])
-  type OutBlock = (Int, Array[Array[Int]])
+private object SimpleALS {
 
   /**
-   * In links for computing src factors.
-   * @param srcIds
-   * @param dstPtrs
-   * @param dstEncodedIndices
-   * @param ratings
+   * Factor block that stores factors (Array[Float]) in an Array.
    */
-  case class InBlock(
-    srcIds: Array[Int],
-    dstPtrs: Array[Int],
-    dstEncodedIndices: Array[Int],
-    ratings: Array[Float])
+  private type FactorBlock = Array[Array[Float]]
 
-  def initialize(inBlocks: RDD[(Int, InBlock)], k: Int): RDD[FactorBlock] = {
+  /**
+   * Out block that stores, for each dst block, which src factors to send.
+   * For example, outBlock(0) contains the indices of the src factors to send to dst block 0.
+   */
+  private type OutBlock = Array[Array[Int]]
+
+  /**
+   * In block for computing src factors.
+   *
+   * For each src id, it stores its associated dst block ids and local indices, and ratings.
+   * So given the dst factors, it is easy to compute src factors one by one.
+   * We use compressed sparse column (CSC) format.
+   *
+   * @param srcIds src ids (ordered)
+   * @param dstPtrs dst pointers. Elements in range [dstPtrs(i), dstPtrs(i+1)) of dst indices and
+   *                ratings are associated with srcIds(i).
+   * @param dstEncodedIndices encoded dst indices
+   * @param ratings ratings
+   */
+  private case class InBlock(
+      srcIds: Array[Int],
+      dstPtrs: Array[Int],
+      dstEncodedIndices: Array[Int],
+      ratings: Array[Float])
+
+  /**
+   * Initializes factors randomly given the in blocks.
+   *
+   * @param inBlocks in blocks
+   * @param k rank
+   * @return initialized factor blocks
+   */
+  private def initialize(inBlocks: RDD[(Int, InBlock)], k: Int): RDD[(Int, FactorBlock)] = {
     inBlocks.map { case (srcBlockId, inBlock) =>
       val random = new XORShiftRandom(srcBlockId)
       val factors = Array.fill(inBlock.srcIds.size) {
@@ -99,9 +121,19 @@ object SimpleALS {
     }
   }
 
-  case class RatingBlock(srcIds: Array[Int], dstIds: Array[Int], ratings: Array[Float])
+  /**
+   * A rating block that contains src ids, dst ids, and ratings.
+   *
+   * @param srcIds src ids
+   * @param dstIds dst ids
+   * @param ratings ratings
+   */
+  private case class RatingBlock(srcIds: Array[Int], dstIds: Array[Int], ratings: Array[Float])
 
-  class RatingBlockBuilder extends Serializable {
+  /**
+   * Builder for [[RatingBlock]].
+   */
+  private class RatingBlockBuilder extends Serializable {
 
     private val srcIds = new IntArrayList()
     private val dstIds = new IntArrayList()
@@ -129,14 +161,24 @@ object SimpleALS {
     def size: Int = srcIds.size
 
     def toRatingBlock: RatingBlock = {
+      trimToSize()
+      RatingBlock(srcIds.elements(), dstIds.elements(), ratings.elements())
+    }
+
+    private def trimToSize(): Unit = {
       srcIds.trimToSize()
       dstIds.trimToSize()
       ratings.trimToSize()
-      RatingBlock(srcIds.elements(), dstIds.elements(), ratings.elements())
+    }
+
+    @throws(classOf[IOException])
+    private def writeObject(out: ObjectOutputStream): Unit = {
+      trimToSize()
+      out.defaultWriteObject()
     }
   }
 
-  def blockifyRatings(ratings: RDD[Rating], srcPart: Partitioner, dstPart: Partitioner): RDD[((Int, Int), RatingBlock)] = {
+  private def blockifyRatings(ratings: RDD[Rating], srcPart: Partitioner, dstPart: Partitioner): RDD[((Int, Int), RatingBlock)] = {
     val gridPart = new GridPartitioner(Array(srcPart, dstPart))
     ratings.mapPartitions { iter =>
       val blocks = Array.fill(gridPart.numPartitions)(new RatingBlockBuilder)
@@ -164,7 +206,7 @@ object SimpleALS {
     }.setName("blockRatings")
   }
 
-  class UncompressedBlockBuilder(encoder: LocalIndexEncoder) {
+  private class UncompressedBlockBuilder(encoder: LocalIndexEncoder) {
 
     val srcIds = new IntArrayList()
     val dstEncodedIndices = new IntArrayList()
@@ -192,7 +234,7 @@ object SimpleALS {
     }
   }
 
-  class UncompressedBlock(
+  private class UncompressedBlock(
       val srcIds: Array[Int],
       val dstEncodedIndices: Array[Int],
       val ratings: Array[Float]) {
@@ -307,7 +349,7 @@ object SimpleALS {
     }
   }
 
-  class LocalRatingBlockSort extends SortDataFormat[UncompressedBlock] {
+  private class LocalRatingBlockSort extends SortDataFormat[UncompressedBlock] {
 
     override protected def getKey(data: UncompressedBlock, pos: Int): Int = {
       data.srcIds(pos)
@@ -351,11 +393,11 @@ object SimpleALS {
     }
   }
 
-  def makeBlocks(
+  private def makeBlocks(
       prefix: String,
       ratingBlocks: RDD[((Int, Int), RatingBlock)],
       srcPart: Partitioner,
-      dstPart: Partitioner): (RDD[(Int, InBlock)], RDD[OutBlock]) = {
+      dstPart: Partitioner): (RDD[(Int, InBlock)], RDD[(Int, OutBlock)]) = {
     val inBlocks = ratingBlocks.map { case ((srcBlockId, dstBlockId), RatingBlock(srcIds, dstIds, ratings)) =>
       // faster version of
       var start = System.nanoTime()
@@ -417,13 +459,13 @@ object SimpleALS {
     (inBlocks, outBlocks)
   }
 
-  def computeFactors(
-      srcFactorBlocks: RDD[FactorBlock],
-      srcOutBlocks: RDD[OutBlock],
+  private def computeFactors(
+      srcFactorBlocks: RDD[(Int, FactorBlock)],
+      srcOutBlocks: RDD[(Int, OutBlock)],
       dstInBlocks: RDD[(Int, InBlock)],
       k: Int,
       lambda: Double,
-      srcEncoder: LocalIndexEncoder): RDD[FactorBlock] = {
+      srcEncoder: LocalIndexEncoder): RDD[(Int, FactorBlock)] = {
     val srcOut = srcOutBlocks.join(srcFactorBlocks).flatMap { case (srcBlockId, (srcOutBlock, srcFactors)) =>
       srcOutBlock.view.zipWithIndex.map { case (activeIndices, dstBlockId) =>
         (dstBlockId, (srcBlockId, activeIndices.map(idx => srcFactors(idx))))
