@@ -31,7 +31,12 @@ class SimpleALS extends Serializable {
 
   import org.apache.spark.ml.SimpleALS._
 
-  def run(ratings: RDD[Rating], k: Int = 10, numBlocks: Int = 10, numIterations: Int = 10, lambda: Double  = 1.0): (RDD[(Int, Array[Float])], RDD[(Int, Array[Float])]) = {
+  def run(
+      ratings: RDD[Rating],
+      k: Int = 10,
+      numBlocks: Int = 10,
+      numIterations: Int = 10,
+      lambda: Double = 1.0): (RDD[(Int, Array[Float])], RDD[(Int, Array[Float])]) = {
     val userPart = new HashPartitioner(numBlocks)
     val prodPart = new HashPartitioner(numBlocks)
     val userLocalIndexEncoder = new LocalIndexEncoder(userPart.numPartitions)
@@ -276,40 +281,8 @@ private object SimpleALS {
       InBlock(uniqueSrcIds.elements(), dstPtrs, dstEncodedIndices, ratings)
     }
 
-    private def indexSort(): Unit = {
-      val sz = size
-
-      val indices = new Array[Int](sz)
-      var i = 0
-      while (i < sz) {
-        indices(i) = i
-        i += 1
-      }
-      def ord(i0: Int, i1: Int): Boolean = {
-        srcIds(i0) < srcIds(i1)
-      }
-      val sortedIndices = indices.sortWith(ord)
-
-      val sortedSrcIds = new Array[Int](sz)
-      val sortedDstLocalIndices = new Array[Int](sz)
-      val sortedRatings = new Array[Float](sz)
-
-      i = 0
-      while (i < sz) {
-        val idx = sortedIndices(i)
-        sortedSrcIds(i) = srcIds(idx)
-        sortedDstLocalIndices(i) = dstEncodedIndices(idx)
-        sortedRatings(i) = ratings(idx)
-        i += 1
-      }
-
-      System.arraycopy(sortedSrcIds, 0, srcIds, 0, sz)
-      System.arraycopy(sortedDstLocalIndices, 0, dstEncodedIndices, 0, sz)
-      System.arraycopy(sortedRatings, 0, ratings, 0, sz)
-    }
-
     private def timSort(): Unit = {
-      val sorter = new Sorter(new LocalRatingBlockSort)
+      val sorter = new Sorter(new UncompressedBlockSort)
       val comparator = new IntComparator {
         override def compare(o1: Int, o2: Int): Int = {
           java.lang.Integer.compare(o1, o2)
@@ -318,38 +291,16 @@ private object SimpleALS {
       sorter.sort(this, 0, size, comparator)
     }
 
-    private def scalaSort(): Unit = {
-      val sz = size
-      val sorted = (0 until sz).map { i =>
-        (srcIds(i), dstEncodedIndices(i), ratings(i))
-      }.sortBy(_._1)
-      var i = 0
-      sorted.foreach { case (srcId, dstLocalIndex, rating) =>
-        srcIds(i) = srcId
-        dstEncodedIndices(i) = dstLocalIndex
-        ratings(i) = rating
-        i += 1
-      }
-    }
-
     private def sort(): Unit = {
       val sz = size
       println("size: " + sz)
       val start = System.nanoTime()
-      // indexSort()
       timSort()
-      // scalaSort()
       println("sort uncompressed time: " + (System.nanoTime() - start) / 1e9)
-    }
-
-    override def toString: String = {
-      "srcIds: " + srcIds.toSeq + "\n" +
-          "dstEncodedIndices: " + dstEncodedIndices.toSeq + "\n" +
-          "ratings: " + ratings.toSeq
     }
   }
 
-  private class LocalRatingBlockSort extends SortDataFormat[UncompressedBlock] {
+  private class UncompressedBlockSort extends SortDataFormat[UncompressedBlock] {
 
     override protected def getKey(data: UncompressedBlock, pos: Int): Int = {
       data.srcIds(pos)
@@ -400,10 +351,8 @@ private object SimpleALS {
       dstPart: Partitioner): (RDD[(Int, InBlock)], RDD[(Int, OutBlock)]) = {
     val inBlocks = ratingBlocks.map { case ((srcBlockId, dstBlockId), RatingBlock(srcIds, dstIds, ratings)) =>
       // faster version of
-      var start = System.nanoTime()
       // val slowDstIdToLocalIndex = dstIds.toSet.toSeq.sorted.zipWithIndex.toMap
-      // println("slow sort time: " + (System.nanoTime() - start) / 1e9)
-      // start = System.nanoTime()
+      var start = System.nanoTime()
       val dstIdSet = new OpenHashSet[Int](1 << 20)
       dstIds.foreach(dstIdSet.add)
       val sortedDstIds = new Array[Int](dstIdSet.size)
@@ -422,7 +371,7 @@ private object SimpleALS {
         dstIdToLocalIndex.update(sortedDstIds(i), i)
         i += 1
       }
-      println("fast sort time: " + (System.nanoTime() - start) / 1e9)
+      println("convert to local indices time: " + (System.nanoTime() - start) / 1e9)
       val dstLocalIndices = dstIds.map(dstIdToLocalIndex.apply)
       (srcBlockId, (dstBlockId, srcIds, dstLocalIndices, ratings))
     }.groupByKey(new IdentityPartitioner(srcPart.numPartitions))
@@ -444,7 +393,7 @@ private object SimpleALS {
         while (j < dstPtrs(i + 1)) {
           val dstBlockId = encoder.blockId(dstEncodedIndices(j))
           if (!seen(dstBlockId)) {
-            activeIds(dstBlockId).add(i) // add the index
+            activeIds(dstBlockId).add(i) // add the local index
             seen(dstBlockId) = true
           }
           j += 1
