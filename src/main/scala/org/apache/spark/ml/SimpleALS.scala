@@ -4,9 +4,9 @@ import java.io.{IOException, ObjectOutputStream}
 import java.{util => javaUtil}
 
 import cern.colt.list.{IntArrayList, FloatArrayList}
+import com.github.fommil.netlib.BLAS.{getInstance => blas}
 
 import als.{GridPartitioner, IdentityPartitioner, LeastSquares}
-import com.github.fommil.netlib.BLAS.{getInstance => blas}
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.random.XORShiftRandom
@@ -43,17 +43,22 @@ class SimpleALS extends Serializable {
     val prodLocalIndexEncoder = new LocalIndexEncoder(prodPart.numPartitions)
     val blockRatings = blockifyRatings(ratings, userPart, prodPart).cache()
     val (userInBlocks, userOutBlocks) = makeBlocks("user", blockRatings, userPart, prodPart)
+    // materialize blockRatings and user blocks
     userOutBlocks.count()
-    val swappedBlockRatings = blockRatings.map { case ((userBlockId, prodBlockId), RatingBlock(userIds, prodIds, localRatings)) =>
-      ((prodBlockId, userBlockId), RatingBlock(prodIds, userIds, localRatings))
+    val swappedBlockRatings = blockRatings.map {
+      case ((userBlockId, prodBlockId), RatingBlock(userIds, prodIds, localRatings)) =>
+        ((prodBlockId, userBlockId), RatingBlock(prodIds, userIds, localRatings))
     }
     val (prodInBlocks, prodOutBlocks) = makeBlocks("prod", swappedBlockRatings, prodPart, userPart)
+    // materialize prod blocks
     prodOutBlocks.count()
     var userFactors = initialize(userInBlocks, k)
     var prodFactors = initialize(prodInBlocks, k)
     for (iter <- 0 until numIterations) {
-      prodFactors = computeFactors(userFactors, userOutBlocks, prodInBlocks, k, lambda, userLocalIndexEncoder)
-      userFactors = computeFactors(prodFactors, prodOutBlocks, userInBlocks, k, lambda, prodLocalIndexEncoder)
+      prodFactors =
+          computeFactors(userFactors, userOutBlocks, prodInBlocks, k, lambda, userLocalIndexEncoder)
+      userFactors =
+          computeFactors(prodFactors, prodOutBlocks, userInBlocks, k, lambda, prodLocalIndexEncoder)
     }
     val userIdAndFactors = userInBlocks.mapValues(_.srcIds).join(userFactors).values.cache()
     val prodIdAndFactors = prodInBlocks.mapValues(_.srcIds).join(prodFactors).values.cache()
@@ -183,7 +188,10 @@ private object SimpleALS {
     }
   }
 
-  private def blockifyRatings(ratings: RDD[Rating], srcPart: Partitioner, dstPart: Partitioner): RDD[((Int, Int), RatingBlock)] = {
+  private def blockifyRatings(
+      ratings: RDD[Rating],
+      srcPart: Partitioner,
+      dstPart: Partitioner): RDD[((Int, Int), RatingBlock)] = {
     val gridPart = new GridPartitioner(Array(srcPart, dstPart))
     ratings.mapPartitions { iter =>
       val blocks = Array.fill(gridPart.numPartitions)(new RatingBlockBuilder)
@@ -217,7 +225,11 @@ private object SimpleALS {
     val dstEncodedIndices = new IntArrayList()
     val ratings = new FloatArrayList()
 
-    def add(theDstBlockId: Int, theSrcIds: Array[Int], theDstLocalIndices: Array[Int], theRatings: Array[Float]): this.type = {
+    def add(
+        theDstBlockId: Int,
+        theSrcIds: Array[Int],
+        theDstLocalIndices: Array[Int],
+        theRatings: Array[Float]): this.type = {
       val sz = theSrcIds.size
       require(theDstLocalIndices.size == sz)
       require(theRatings.size == sz)
@@ -306,7 +318,10 @@ private object SimpleALS {
       data.srcIds(pos)
     }
 
-    private def swapElements[@specialized(Int, Float) T](data: Array[T], pos0: Int, pos1: Int): Unit = {
+    private def swapElements[@specialized(Int, Float) T](
+        data: Array[T],
+        pos0: Int,
+        pos1: Int): Unit = {
       val tmp = data(pos0)
       data(pos0) = data(pos1)
       data(pos1) = tmp
@@ -330,7 +345,8 @@ private object SimpleALS {
     }
 
     override protected def allocate(length: Int): UncompressedBlock = {
-      new UncompressedBlock(new Array[Int](length), new Array[Int](length), new Array[Float](length))
+      new UncompressedBlock(
+        new Array[Int](length), new Array[Int](length), new Array[Float](length))
     }
 
     override protected def copyElement(
@@ -349,34 +365,36 @@ private object SimpleALS {
       ratingBlocks: RDD[((Int, Int), RatingBlock)],
       srcPart: Partitioner,
       dstPart: Partitioner): (RDD[(Int, InBlock)], RDD[(Int, OutBlock)]) = {
-    val inBlocks = ratingBlocks.map { case ((srcBlockId, dstBlockId), RatingBlock(srcIds, dstIds, ratings)) =>
-      // faster version of
-      // val slowDstIdToLocalIndex = dstIds.toSet.toSeq.sorted.zipWithIndex.toMap
-      var start = System.nanoTime()
-      val dstIdSet = new OpenHashSet[Int](1 << 20)
-      dstIds.foreach(dstIdSet.add)
-      val sortedDstIds = new Array[Int](dstIdSet.size)
-      var i = 0
-      var pos = dstIdSet.nextPos(0)
-      while (pos != -1) {
-        sortedDstIds(i) = dstIdSet.getValue(pos)
-        pos = dstIdSet.nextPos(pos + 1)
-        i += 1
-      }
-      assert(i == dstIdSet.size)
-      javaUtil.Arrays.sort(sortedDstIds)
-      val dstIdToLocalIndex = new OpenHashMap[Int, Int](sortedDstIds.size)
-      i = 0
-      while (i < sortedDstIds.size) {
-        dstIdToLocalIndex.update(sortedDstIds(i), i)
-        i += 1
-      }
-      println("convert to local indices time: " + (System.nanoTime() - start) / 1e9)
-      val dstLocalIndices = dstIds.map(dstIdToLocalIndex.apply)
-      (srcBlockId, (dstBlockId, srcIds, dstLocalIndices, ratings))
+    val inBlocks = ratingBlocks.map {
+      case ((srcBlockId, dstBlockId), RatingBlock(srcIds, dstIds, ratings)) =>
+        // faster version of
+        // val slowDstIdToLocalIndex = dstIds.toSet.toSeq.sorted.zipWithIndex.toMap
+        val start = System.nanoTime()
+        val dstIdSet = new OpenHashSet[Int](1 << 20)
+        dstIds.foreach(dstIdSet.add)
+        val sortedDstIds = new Array[Int](dstIdSet.size)
+        var i = 0
+        var pos = dstIdSet.nextPos(0)
+        while (pos != -1) {
+          sortedDstIds(i) = dstIdSet.getValue(pos)
+          pos = dstIdSet.nextPos(pos + 1)
+          i += 1
+        }
+        assert(i == dstIdSet.size)
+        javaUtil.Arrays.sort(sortedDstIds)
+        val dstIdToLocalIndex = new OpenHashMap[Int, Int](sortedDstIds.size)
+        i = 0
+        while (i < sortedDstIds.size) {
+          dstIdToLocalIndex.update(sortedDstIds(i), i)
+          i += 1
+        }
+        println("convert to local indices time: " + (System.nanoTime() - start) / 1e9)
+        val dstLocalIndices = dstIds.map(dstIdToLocalIndex.apply)
+        (srcBlockId, (dstBlockId, srcIds, dstLocalIndices, ratings))
     }.groupByKey(new IdentityPartitioner(srcPart.numPartitions))
         .mapValues { iter =>
-      val uncompressedBlockBuilder = new UncompressedBlockBuilder(new LocalIndexEncoder(dstPart.numPartitions))
+      val uncompressedBlockBuilder =
+        new UncompressedBlockBuilder(new LocalIndexEncoder(dstPart.numPartitions))
       iter.foreach { case (dstBlockId, srcIds, dstLocalIndices, ratings) =>
         uncompressedBlockBuilder.add(dstBlockId, srcIds, dstLocalIndices, ratings)
       }
@@ -415,28 +433,32 @@ private object SimpleALS {
       k: Int,
       lambda: Double,
       srcEncoder: LocalIndexEncoder): RDD[(Int, FactorBlock)] = {
-    val srcOut = srcOutBlocks.join(srcFactorBlocks).flatMap { case (srcBlockId, (srcOutBlock, srcFactors)) =>
-      srcOutBlock.view.zipWithIndex.map { case (activeIndices, dstBlockId) =>
-        (dstBlockId, (srcBlockId, activeIndices.map(idx => srcFactors(idx))))
-      }
+    val srcOut = srcOutBlocks.join(srcFactorBlocks).flatMap {
+      case (srcBlockId, (srcOutBlock, srcFactors)) =>
+        srcOutBlock.view.zipWithIndex.map { case (activeIndices, dstBlockId) =>
+          (dstBlockId, (srcBlockId, activeIndices.map(idx => srcFactors(idx))))
+        }
     }
     val merged = srcOut.groupByKey(new IdentityPartitioner(dstInBlocks.partitions.size))
-    dstInBlocks.join(merged).mapValues { case (InBlock(dstIds, srcPtrs, srcEncodedIndices, ratings), srcFactors) =>
-      val sortedSrcFactors = srcFactors.toSeq.sortBy(_._1).map(_._2).toArray
-      val dstFactors = new Array[Array[Float]](dstIds.size)
-      var j = 0
-      val ls = new LeastSquares(k)
-      while (j < dstIds.size) {
-        var i = srcPtrs(j)
-        while (i < srcPtrs(j + 1)) {
-          val encoded = srcEncodedIndices(i)
-          ls.add(sortedSrcFactors(srcEncoder.blockId(encoded))(srcEncoder.localIndex(encoded)), ratings(i))
-          i += 1
+    dstInBlocks.join(merged).mapValues {
+      case (InBlock(dstIds, srcPtrs, srcEncodedIndices, ratings), srcFactors) =>
+        val sortedSrcFactors = srcFactors.toSeq.sortBy(_._1).map(_._2).toArray
+        val dstFactors = new Array[Array[Float]](dstIds.size)
+        var j = 0
+        val ls = new LeastSquares(k)
+        while (j < dstIds.size) {
+          var i = srcPtrs(j)
+          while (i < srcPtrs(j + 1)) {
+            val encoded = srcEncodedIndices(i)
+            val blockId = srcEncoder.blockId(encoded)
+            val localIndex = srcEncoder.localIndex(encoded)
+            ls.add(sortedSrcFactors(blockId)(localIndex), ratings(i))
+            i += 1
+          }
+          dstFactors(j) = ls.solve(lambda = lambda)
+          j += 1
         }
-        dstFactors(j) = ls.solve(lambda = lambda)
-        j += 1
-      }
-      dstFactors
+        dstFactors
     }
   }
 
