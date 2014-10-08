@@ -1,4 +1,4 @@
-package als
+package org.apache.spark.ml.util
 
 import org.apache.spark.Partitioner
 

@@ -6,13 +6,12 @@ import java.{util => javaUtil}
 import cern.colt.list.{IntArrayList, FloatArrayList}
 import com.github.fommil.netlib.BLAS.{getInstance => blas}
 
-import als.{GridPartitioner, IdentityPartitioner, LeastSquares}
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.random.XORShiftRandom
 import org.apache.spark.{HashPartitioner, Partitioner}
 import org.apache.spark.util.collection.{OpenHashMap, OpenHashSet}
-import org.apache.spark.ml.util.{Sorter, SortDataFormat, IntComparator}
+import org.apache.spark.ml.util._
 
 class Rating(val user: Int, val product: Int, val rating: Float) extends Serializable
 
