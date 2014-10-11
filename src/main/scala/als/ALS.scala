@@ -222,7 +222,7 @@ object ALS {
           ls.add(srcFactorMap(srcId), directRatings(i))
           i += 1
         }
-        dstFactors += ((dstId, ls.solve(lambda = 0.1f)))
+        // dstFactors += ((dstId, ls.solve(lambda = 0.1f)))
         j += 1
       }
       dstFactors.toMap

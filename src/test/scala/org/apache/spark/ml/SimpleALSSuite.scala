@@ -28,7 +28,7 @@ class SimpleALSSuite extends FunSuite with BeforeAndAfterAll {
     val simpleAls = new SimpleALS
     val k = 10
     val start = System.nanoTime()
-    val (userFactors, prodFactors) = simpleAls.run(training, k = k, numBlocks = 2, numIterations = 10, lambda = 0.1)
+    val (userFactors, prodFactors) = simpleAls.run(training, k = k, numBlocks = 2, numIterations = 10, lambda = 0.1, implicitPrefs = true)
     val end = System.nanoTime()
     println("Time: " + (end - start) / 1e9)
     // throw new RuntimeException("stop")

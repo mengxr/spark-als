@@ -35,7 +35,9 @@ class SimpleALS extends Serializable {
       k: Int = 10,
       numBlocks: Int = 10,
       numIterations: Int = 10,
-      lambda: Double = 1.0): (RDD[(Int, Array[Float])], RDD[(Int, Array[Float])]) = {
+      lambda: Double = 1.0,
+      implicitPrefs: Boolean = false,
+      alpha: Double = 1.0): (RDD[(Int, Array[Float])], RDD[(Int, Array[Float])]) = {
     val userPart = new HashPartitioner(numBlocks)
     val prodPart = new HashPartitioner(numBlocks)
     val userLocalIndexEncoder = new LocalIndexEncoder(userPart.numPartitions)
@@ -53,15 +55,29 @@ class SimpleALS extends Serializable {
     prodOutBlocks.count()
     var userFactors = initialize(userInBlocks, k)
     var prodFactors = initialize(prodInBlocks, k)
-    for (iter <- 0 until numIterations) {
-      prodFactors =
-          computeFactors(userFactors, userOutBlocks, prodInBlocks, k, lambda, userLocalIndexEncoder)
-      userFactors =
-          computeFactors(prodFactors, prodOutBlocks, userInBlocks, k, lambda, prodLocalIndexEncoder)
+    if (implicitPrefs) {
+      for (iter <- 1 to numIterations) {
+        userFactors.setName(s"userFactors-$iter").persist()
+        val YtY = Some(computeYtY(userFactors, k))
+        val previousProdFactors = prodFactors
+        prodFactors = computeFactors(userFactors, userOutBlocks, prodInBlocks, k, lambda, userLocalIndexEncoder, implicitPrefs, alpha, YtY)
+        previousProdFactors.unpersist()
+        prodFactors.setName(s"prodFactors-$iter").persist()
+        val XtX = Some(computeYtY(prodFactors, k))
+        val previousUserFactors = userFactors
+        userFactors = computeFactors(prodFactors, prodOutBlocks, userInBlocks, k, lambda, prodLocalIndexEncoder, implicitPrefs, alpha, XtX)
+        previousUserFactors.unpersist()
+      }
+    } else {
+      for (iter <- 0 until numIterations) {
+        prodFactors = computeFactors(userFactors, userOutBlocks, prodInBlocks, k, lambda, userLocalIndexEncoder)
+        userFactors = computeFactors(prodFactors, prodOutBlocks, userInBlocks, k, lambda, prodLocalIndexEncoder)
+      }
     }
-    val userIdAndFactors = userInBlocks.mapValues(_.srcIds).join(userFactors).values.cache()
-    val prodIdAndFactors = prodInBlocks.mapValues(_.srcIds).join(prodFactors).values.cache()
+    val userIdAndFactors = userInBlocks.mapValues(_.srcIds).join(userFactors).values.setName("userFactors").cache()
     userIdAndFactors.count()
+    prodFactors.unpersist()
+    val prodIdAndFactors = prodInBlocks.mapValues(_.srcIds).join(prodFactors).values.setName("prodFactors").cache()
     prodIdAndFactors.count()
     userInBlocks.unpersist()
     userOutBlocks.unpersist()
@@ -431,7 +447,10 @@ private object SimpleALS {
       dstInBlocks: RDD[(Int, InBlock)],
       k: Int,
       lambda: Double,
-      srcEncoder: LocalIndexEncoder): RDD[(Int, FactorBlock)] = {
+      srcEncoder: LocalIndexEncoder,
+      implicitPrefs: Boolean = false,
+      alpha: Double = 1.0,
+      YtY: Option[NormalEquation] = None): RDD[(Int, FactorBlock)] = {
     val srcOut = srcOutBlocks.join(srcFactorBlocks).flatMap {
       case (srcBlockId, (srcOutBlock, srcFactors)) =>
         srcOutBlock.view.zipWithIndex.map { case (activeIndices, dstBlockId) =>
@@ -445,20 +464,40 @@ private object SimpleALS {
         val dstFactors = new Array[Array[Float]](dstIds.size)
         var j = 0
         val ls = new NormalEquation(k)
+        val solver = new CholeskySolver(k)
         while (j < dstIds.size) {
+          ls.reset()
+          if (implicitPrefs) {
+            ls.merge(YtY.get)
+          }
           var i = srcPtrs(j)
           while (i < srcPtrs(j + 1)) {
             val encoded = srcEncodedIndices(i)
             val blockId = srcEncoder.blockId(encoded)
             val localIndex = srcEncoder.localIndex(encoded)
-            ls.add(sortedSrcFactors(blockId)(localIndex), ratings(i))
+            val srcFactor = sortedSrcFactors(blockId)(localIndex)
+            val rating = ratings(i)
+            if (implicitPrefs) {
+              ls.addImplicit(srcFactor, rating, alpha)
+            } else {
+              ls.add(srcFactor, rating)
+            }
             i += 1
           }
-          dstFactors(j) = ls.solve(lambda = lambda)
+          dstFactors(j) = solver.solve(ls, lambda)
           j += 1
         }
         dstFactors
     }
+  }
+
+  private def computeYtY(factorBlocks: RDD[(Int, FactorBlock)], k: Int): NormalEquation = {
+    factorBlocks.values.aggregate(new NormalEquation(k))(
+      seqOp = (ne, factors) => {
+        factors.foreach(ne.add(_, 0.0f))
+        ne
+      },
+      combOp = (ne1, ne2) => ne1.merge(ne2))
   }
 
   /**
