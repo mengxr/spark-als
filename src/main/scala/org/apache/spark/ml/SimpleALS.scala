@@ -3,14 +3,16 @@ package org.apache.spark.ml
 import java.io.{IOException, ObjectOutputStream}
 import java.{util => javaUtil}
 
+import cern.colt.function.IntComparator
 import cern.colt.list.{IntArrayList, FloatArrayList}
 import com.github.fommil.netlib.BLAS.{getInstance => blas}
+
 
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.random.XORShiftRandom
 import org.apache.spark.{HashPartitioner, Partitioner}
-import org.apache.spark.util.collection.{OpenHashMap, OpenHashSet}
+import org.apache.spark.util.collection.{Sorter, SortDataFormat, OpenHashMap, OpenHashSet}
 import org.apache.spark.ml.util._
 
 class Rating(val user: Int, val product: Int, val rating: Float) extends Serializable
@@ -315,7 +317,7 @@ private object SimpleALS {
           java.lang.Integer.compare(o1, o2)
         }
       }
-      sorter.sort(this, 0, size, comparator)
+      sorter.sort(this, 0, size, Ordering[IntWrapper])
     }
 
     private def sort(): Unit = {
@@ -327,10 +329,30 @@ private object SimpleALS {
     }
   }
 
-  private class UncompressedBlockSort extends SortDataFormat[UncompressedBlock] {
+  private class IntWrapper(var key: Int = 0) extends Ordered[IntWrapper] {
+    override def compare(that: IntWrapper): Int = {
+      key.compare(that.key)
+    }
+  }
 
-    override protected def getKey(data: UncompressedBlock, pos: Int): Int = {
-      data.srcIds(pos)
+  private class UncompressedBlockSort extends SortDataFormat[IntWrapper, UncompressedBlock] {
+
+    override protected def newKey(): IntWrapper = new IntWrapper()
+
+    override protected def getKey(
+        data: UncompressedBlock,
+        pos: Int,
+        reuse: IntWrapper): IntWrapper = {
+      if (reuse == null) {
+        new IntWrapper(data.srcIds(pos))
+      } else {
+        reuse.key = data.srcIds(pos)
+        reuse
+      }
+    }
+
+    override protected def getKey(data: UncompressedBlock, pos: Int): IntWrapper = {
+      getKey(data, pos, null)
     }
 
     private def swapElements[@specialized(Int, Float) T](
