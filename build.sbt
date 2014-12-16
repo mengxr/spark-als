@@ -8,6 +8,6 @@ version := "0.1-SNAPSHOT"
 
 scalaVersion := "2.10.4"
 
-libraryDependencies += "org.apache.spark" %% "spark-mllib" % "1.2.0-SNAPSHOT"
+libraryDependencies += "org.apache.spark" %% "spark-mllib" % "1.2.1-SNAPSHOT"
 
 libraryDependencies += "org.scalatest" %% "scalatest" % "2.1.5" % Test

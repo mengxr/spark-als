@@ -1,12 +1,10 @@
 package org.apache.spark.ml
 
-import java.io.{IOException, ObjectOutputStream}
 import java.{util => javaUtil}
 
-import cern.colt.function.IntComparator
-import cern.colt.list.{IntArrayList, FloatArrayList}
-import com.github.fommil.netlib.BLAS.{getInstance => blas}
+import scala.collection.mutable.ArrayBuilder
 
+import com.github.fommil.netlib.BLAS.{getInstance => blas}
 
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
@@ -162,46 +160,29 @@ private object SimpleALS {
    */
   private class RatingBlockBuilder extends Serializable {
 
-    private val srcIds = new IntArrayList()
-    private val dstIds = new IntArrayList()
-    private val ratings = new FloatArrayList()
+    private val srcIds = ArrayBuilder.make[Int]
+    private val dstIds = ArrayBuilder.make[Int]
+    private val ratings = ArrayBuilder.make[Float]
+    var size = 0
 
     def add(r: Rating): this.type = {
-      srcIds.add(r.user)
-      dstIds.add(r.product)
-      ratings.add(r.rating)
+      size += 1
+      srcIds += r.user
+      dstIds += r.product
+      ratings += r.rating
       this
     }
 
     def merge(other: RatingBlock): this.type = {
-      val sz = other.srcIds.size
-      var i = 0
-      while (i < sz) {
-        srcIds.add(other.srcIds(i))
-        dstIds.add(other.dstIds(i))
-        ratings.add(other.ratings(i))
-        i += 1
-      }
+      size += other.srcIds.size
+      srcIds ++= other.srcIds
+      dstIds ++= other.dstIds
+      ratings ++= other.ratings
       this
     }
 
-    def size: Int = srcIds.size
-
     def toRatingBlock: RatingBlock = {
-      trimToSize()
-      RatingBlock(srcIds.elements(), dstIds.elements(), ratings.elements())
-    }
-
-    private def trimToSize(): Unit = {
-      srcIds.trimToSize()
-      dstIds.trimToSize()
-      ratings.trimToSize()
-    }
-
-    @throws(classOf[IOException])
-    private def writeObject(out: ObjectOutputStream): Unit = {
-      trimToSize()
-      out.defaultWriteObject()
+      RatingBlock(srcIds.result(), dstIds.result(), ratings.result())
     }
   }
 
@@ -238,9 +219,9 @@ private object SimpleALS {
 
   private class UncompressedBlockBuilder(encoder: LocalIndexEncoder) {
 
-    val srcIds = new IntArrayList()
-    val dstEncodedIndices = new IntArrayList()
-    val ratings = new FloatArrayList()
+    val srcIds = ArrayBuilder.make[Int]
+    val dstEncodedIndices = ArrayBuilder.make[Int]
+    val ratings = ArrayBuilder.make[Float]
 
     def add(
         theDstBlockId: Int,
@@ -250,21 +231,18 @@ private object SimpleALS {
       val sz = theSrcIds.size
       require(theDstLocalIndices.size == sz)
       require(theRatings.size == sz)
+      srcIds ++= theSrcIds
+      ratings ++= theRatings
       var j = 0
       while (j < sz) {
-        srcIds.add(theSrcIds(j))
-        dstEncodedIndices.add(encoder.encode(theDstBlockId, theDstLocalIndices(j)))
-        ratings.add(theRatings(j))
+        dstEncodedIndices += encoder.encode(theDstBlockId, theDstLocalIndices(j))
         j += 1
       }
       this
     }
 
     def build(): UncompressedBlock = {
-      srcIds.trimToSize()
-      dstEncodedIndices.trimToSize()
-      ratings.trimToSize()
-      new UncompressedBlock(srcIds.elements(), dstEncodedIndices.elements(), ratings.elements())
+      new UncompressedBlock(srcIds.result(), dstEncodedIndices.result(), ratings.result())
     }
   }
 
@@ -279,44 +257,42 @@ private object SimpleALS {
       val sz = size
       assert(sz > 0)
       sort()
+      val uniqueSrcIdsBuilder = ArrayBuilder.make[Int]
+      val dstCountsBuilder = ArrayBuilder.make[Int]
       var preSrcId = srcIds(0)
-      val uniqueSrcIds = new IntArrayList()
-      uniqueSrcIds.add(preSrcId)
-      val dstCounts = new IntArrayList()
-      dstCounts.add(1)
+      uniqueSrcIdsBuilder += preSrcId
+      var curCount = 1
       var i = 1
       var j = 0
       while (i < sz) {
         val srcId = srcIds(i)
         if (srcId != preSrcId) {
-          uniqueSrcIds.add(srcId)
-          dstCounts.add(0)
+          uniqueSrcIdsBuilder += srcId
+          dstCountsBuilder += curCount
           preSrcId = srcId
           j += 1
+          curCount = 0
         }
-        dstCounts.setQuick(j, dstCounts.getQuick(j) + 1)
+        curCount += 1
         i += 1
       }
-      uniqueSrcIds.trimToSize()
-      val numUniqueSrdIds = uniqueSrcIds.size()
+      dstCountsBuilder += curCount
+      val uniqueSrcIds = uniqueSrcIdsBuilder.result()
+      val numUniqueSrdIds = uniqueSrcIds.size
+      val dstCounts = dstCountsBuilder.result()
       val dstPtrs = new Array[Int](numUniqueSrdIds + 1)
       var sum = 0
       i = 0
       while (i < numUniqueSrdIds) {
-        sum += dstCounts.getQuick(i)
+        sum += dstCounts(i)
         i += 1
         dstPtrs(i) = sum
       }
-      InBlock(uniqueSrcIds.elements(), dstPtrs, dstEncodedIndices, ratings)
+      InBlock(uniqueSrcIds, dstPtrs, dstEncodedIndices, ratings)
     }
 
     private def timSort(): Unit = {
       val sorter = new Sorter(new UncompressedBlockSort)
-      val comparator = new IntComparator {
-        override def compare(o1: Int, o2: Int): Int = {
-          java.lang.Integer.compare(o1, o2)
-        }
-      }
       sorter.sort(this, 0, size, Ordering[IntWrapper])
     }
 
@@ -337,9 +313,9 @@ private object SimpleALS {
 
   private class UncompressedBlockSort extends SortDataFormat[IntWrapper, UncompressedBlock] {
 
-    override protected def newKey(): IntWrapper = new IntWrapper()
+    override def newKey(): IntWrapper = new IntWrapper()
 
-    override protected def getKey(
+    override def getKey(
         data: UncompressedBlock,
         pos: Int,
         reuse: IntWrapper): IntWrapper = {
@@ -351,7 +327,9 @@ private object SimpleALS {
       }
     }
 
-    override protected def getKey(data: UncompressedBlock, pos: Int): IntWrapper = {
+    override def getKey(
+        data: UncompressedBlock,
+        pos: Int): IntWrapper = {
       getKey(data, pos, null)
     }
 
@@ -364,13 +342,13 @@ private object SimpleALS {
       data(pos1) = tmp
     }
 
-    override protected def swap(data: UncompressedBlock, pos0: Int, pos1: Int): Unit = {
+    override def swap(data: UncompressedBlock, pos0: Int, pos1: Int): Unit = {
       swapElements(data.srcIds, pos0, pos1)
       swapElements(data.dstEncodedIndices, pos0, pos1)
       swapElements(data.ratings, pos0, pos1)
     }
 
-    override protected def copyRange(
+    override def copyRange(
         src: UncompressedBlock,
         srcPos: Int,
         dst: UncompressedBlock,
@@ -381,12 +359,12 @@ private object SimpleALS {
       System.arraycopy(src.ratings, srcPos, dst.ratings, dstPos, length)
     }
 
-    override protected def allocate(length: Int): UncompressedBlock = {
+    override def allocate(length: Int): UncompressedBlock = {
       new UncompressedBlock(
         new Array[Int](length), new Array[Int](length), new Array[Float](length))
     }
 
-    override protected def copyElement(
+    override def copyElement(
         src: UncompressedBlock,
         srcPos: Int,
         dst: UncompressedBlock,
@@ -439,7 +417,7 @@ private object SimpleALS {
     }.setName(prefix + "InBlocks").cache()
     val outBlocks = inBlocks.mapValues { case InBlock(srcIds, dstPtrs, dstEncodedIndices, _) =>
       val encoder = new LocalIndexEncoder(dstPart.numPartitions)
-      val activeIds = Array.fill(dstPart.numPartitions)(new IntArrayList())
+      val activeIds = Array.fill(dstPart.numPartitions)(ArrayBuilder.make[Int])
       var i = 0
       val seen = new Array[Boolean](dstPart.numPartitions)
       while (i < srcIds.size) {
@@ -448,7 +426,7 @@ private object SimpleALS {
         while (j < dstPtrs(i + 1)) {
           val dstBlockId = encoder.blockId(dstEncodedIndices(j))
           if (!seen(dstBlockId)) {
-            activeIds(dstBlockId).add(i) // add the local index
+            activeIds(dstBlockId) += i // add the local index
             seen(dstBlockId) = true
           }
           j += 1
@@ -456,8 +434,7 @@ private object SimpleALS {
         i += 1
       }
       activeIds.map { x =>
-        x.trimToSize()
-        x.elements()
+        x.result()
       }
     }.setName(prefix + "OutBlocks").cache()
     (inBlocks, outBlocks)
@@ -556,4 +533,3 @@ private object SimpleALS {
     }
   }
 }
-
